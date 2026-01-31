@@ -41,7 +41,11 @@ class AsyncJsonlLogger:
     def log(self, record: Dict[str, Any]) -> None:
         """Enqueue one JSONL record without blocking; drop if queue is full."""
         try:
-            line = json.dumps(record, separators=(",", ":"), ensure_ascii=False)
+            line = json.dumps(record, separators=(",", ":"), ensure_ascii=False, default=str)
+        except Exception:
+            return
+
+        try:
             self._q.put_nowait(line)
         except asyncio.QueueFull:
             return
@@ -69,9 +73,14 @@ class AsyncJsonlLogger:
         os.makedirs(os.path.dirname(self.path) or ".", exist_ok=True)
 
         while True:
-            batch = await self._take_batch()
-            if batch:
-                await asyncio.to_thread(_append_lines_sync, self.path, batch)
+            try:
+                batch = await self._take_batch()
+                if batch:
+                    await asyncio.to_thread(_append_lines_sync, self.path, batch)
+            except Exception:
+                # Do not die; back off briefly and continue.
+                await asyncio.sleep(0.25)
+                continue
 
             await asyncio.sleep(self.flush_every_s)
 

@@ -18,6 +18,7 @@ import websockets
 from config import BINANCE_STREAM_SUFFIX, BINANCE_WS_BASE
 from raw_logger import AsyncJsonlLogger
 from state import AppState, now_ms, push_burst_line
+from state import AppState, now_ms, update_tape_on_trade
 
 
 def _stream_name(symbol: str) -> str:
@@ -77,7 +78,21 @@ async def binance_ws_task(state: AppState, logger: AsyncJsonlLogger, symbol: str
                     if state.driver.strike == 0.0:
                         state.driver.strike = price
 
-                    push_burst_line(state.tape_driver, state.driver.last, state.driver.d_last, lag_ms)
+                    qty = float(parsed["qty"])
+                    is_buyer_maker = bool(parsed["is_buyer_maker"])
+
+                    trade_ts_ms = float(parsed["trade_ts_ms"])
+                    trade_ms = trade_ts_ms if trade_ts_ms > 0.0 else now_ms()
+
+                    update_tape_on_trade(
+                        state.tape_driver,
+                        trade_ms,
+                        state.driver.last,
+                        state.driver.d_last,
+                        lag_ms,
+                        qty,
+                        is_buyer_maker,
+                    )
 
                     logger.log(
                         {
@@ -91,15 +106,18 @@ async def binance_ws_task(state: AppState, logger: AsyncJsonlLogger, symbol: str
                     )
 
         except Exception as e:
-            logger.log(
-                {
-                    "ts_local_ms": now_ms(),
-                    "source": "binance",
-                    "type": "error",
-                    "symbol": symbol,
-                    "err": repr(e),
-                }
-            )
+            try:
+                logger.log(
+                    {
+                        "ts_local_ms": now_ms(),
+                        "source": "binance",
+                        "type": "error",
+                        "symbol": symbol,
+                        "err": repr(e),
+                    }
+                )
+            except Exception:
+                pass
             await _backoff_sleep()
 
 

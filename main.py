@@ -41,8 +41,10 @@ def init_state(state: AppState) -> None:
     state.book.fv_yes = 0.5055
     state.book.fv_no = 0.4955
 
-    for _ in range(10):
+    for _ in range(20):
         state.tape_driver.lines.append("")
+
+    for _ in range(5):
         state.tape_resolver.lines.append("")
 
 
@@ -132,6 +134,7 @@ async def run_app() -> None:
         flush_every_s=RAW_LOG_FLUSH_EVERY_S,
     )
     logger.start()
+    logger.log({"ts_local_ms": time.time() * 1000.0, "source": "app", "type": "logger_start"})
 
     layout = build_layout(state)
     kb = build_keybindings(state)
