@@ -65,7 +65,6 @@ def make_resolver_tape() -> BurstState:
     return BurstState(lines=deque(maxlen=5))
 
 
-
 @dataclass(slots=True)
 class DriverHeaderState:
     """Header fields for Binance driver pane."""
@@ -205,7 +204,39 @@ def update_rate_from_second_bucket(tape: "BurstState", trade_ms: float) -> None:
     inst = float(tape.sec_count)
     tape.rate_ewma = inst if tape.rate_ewma <= 0.0 else (1.0 - BURST_ALPHA) * tape.rate_ewma + BURST_ALPHA * inst
 
-BIG_MOVE_PX: float = 10.0  # you can tune
+
+def update_second_bucket(tape: "BurstState", trade_ms: float, price: float) -> None:
+    """
+    Update per-second counters and second-level move.
+
+    - Bucket by int(trade_ms//1000)
+    - Track current-second open price (first trade px in that second)
+    - Track current-second move = price - open
+    - Update EWMA of trades/sec using the running count for the current second
+    """
+    sec = int(trade_ms // 1000.0)
+
+    if tape.last_sec == 0:
+        tape.last_sec = sec
+        tape.sec_count = 0
+        tape.rate_ewma = 0.0
+        tape.sec_open_px = price
+        tape.sec_move_px = 0.0
+
+    if sec != tape.last_sec:
+        tape.last_sec = sec
+        tape.sec_count = 0
+        tape.sec_open_px = price
+        tape.sec_move_px = 0.0
+
+    tape.sec_count += 1
+    tape.sec_move_px = price - tape.sec_open_px
+
+    inst = float(tape.sec_count)
+    tape.rate_ewma = inst if tape.rate_ewma <= 0.0 else (1.0 - BURST_ALPHA) * tape.rate_ewma + BURST_ALPHA * inst
+
+
+BIG_MOVE_PX: float = 35.0  # you can tune
 
 
 def ansi_bg_green(s: str) -> str:
@@ -219,6 +250,11 @@ def ansi_bg_red(s: str) -> str:
 
 
 def ansi_yellow_bg(s: str) -> str:
+    """Wrap a string in ANSI yellow background."""
+    return f"\x1b[43m{s}\x1b[0m"
+
+
+def ansi_bg_yellow(s: str) -> str:
     """Wrap a string in ANSI yellow background."""
     return f"\x1b[43m{s}\x1b[0m"
 
@@ -239,6 +275,7 @@ def format_tape_line(
     rate_ewma: float,
     burst_level: int,
     is_buyer_maker: bool,
+    sec_move_px: float,
 ) -> str:
     """Format one tape line with run counters and burst indicator."""
     t = time.strftime("%H:%M:%S")
@@ -248,9 +285,27 @@ def format_tape_line(
 
     s = (
         f"{t}  {price:0.2f}  Δ {d_last:+0.2f}  "
-        f"x{run_count:3d}  v {run_qty:7.3f}  r {rps:4.0f}/s  {badge}  {side}  lag {lag_ms:0.0f}ms"
+        f"x{run_count:3d}  v {run_qty:7.3f}  r {rps:4.0f}/s  "
+        f"Δ1s {sec_move_px:+6.2f}  {badge}  {side}  lag {lag_ms:0.0f}ms"
     )
-    return maybe_highlight_line(s, burst_level)
+    return apply_line_highlight(s, sec_move_px, burst_level)
+
+
+def apply_line_highlight(s: str, sec_move_px: float, burst_level: int) -> str:
+    """
+    Apply background highlight with precedence:
+
+    1) Big move (>= BIG_MOVE_PX) -> green/red
+    2) Burst level 3 -> yellow
+    3) Otherwise no highlight
+    """
+    if sec_move_px >= BIG_MOVE_PX:
+        return ansi_bg_green(s)
+    if sec_move_px <= -BIG_MOVE_PX:
+        return ansi_bg_red(s)
+    if burst_level >= 3:
+        return ansi_bg_yellow(s)
+    return s
 
 
 def update_tape_on_trade(
@@ -283,7 +338,7 @@ def update_tape_on_trade(
     #     tape.burst_until_ms,
     # )
 
-    update_rate_from_second_bucket(tape, trade_ms)
+    update_second_bucket(tape, trade_ms, price)
 
     tape.burst_level, tape.burst_until_ms = update_burst_gate(
         tape.burst_level,
@@ -309,6 +364,7 @@ def update_tape_on_trade(
                 tape.rate_ewma,
                 tape.burst_level,
                 is_buyer_maker,
+                tape.sec_move_px,
             )
         )
         return
@@ -324,4 +380,5 @@ def update_tape_on_trade(
         tape.rate_ewma,
         tape.burst_level,
         is_buyer_maker,
+        tape.sec_move_px,
     )

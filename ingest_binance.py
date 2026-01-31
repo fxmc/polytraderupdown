@@ -10,15 +10,23 @@ Connects to the Binance WS trade stream and updates:
 from __future__ import annotations
 
 import json
-import time
 from typing import Any, Dict, Optional
 
 import websockets
 
+from candles import (
+    CandleSeries,
+    TF_1M_MS,
+    TF_5M_MS,
+    TF_15M_MS,
+    atr2_from_last3,
+    bucket_start_ms,
+    update_series_with_trade,
+)
 from config import BINANCE_STREAM_SUFFIX, BINANCE_WS_BASE
 from raw_logger import AsyncJsonlLogger
-from state import AppState, now_ms, push_burst_line
 from state import AppState, now_ms, update_tape_on_trade
+
 
 
 def _stream_name(symbol: str) -> str:
@@ -54,7 +62,10 @@ async def binance_ws_task(state: AppState, logger: AsyncJsonlLogger, symbol: str
     """Run Binance WS ingestion and update driver state + tape (state-only mutation)."""
     url = _ws_url(symbol)
     state.driver.symbol = symbol
-
+    cs_1m = CandleSeries(tf_ms=TF_1M_MS)
+    cs_5m = CandleSeries(tf_ms=TF_5M_MS)
+    cs_15m = CandleSeries(tf_ms=TF_15M_MS)
+    last_roll_15m_start: int = 0
     while True:
         try:
             async with websockets.connect(url, ping_interval=20, ping_timeout=20) as ws:
@@ -67,8 +78,34 @@ async def binance_ws_task(state: AppState, logger: AsyncJsonlLogger, symbol: str
                         continue
 
                     price = float(parsed["price"])
+                    qty = float(parsed["qty"])
+                    is_buyer_maker = bool(parsed["is_buyer_maker"])
                     trade_ts_ms = float(parsed["trade_ts_ms"])
+                    trade_ms = trade_ts_ms if trade_ts_ms > 0.0 else now_ms()
                     lag_ms = max(0.0, recv_ms - trade_ts_ms) if trade_ts_ms > 0 else 0.0
+
+                    update_series_with_trade(cs_1m, trade_ms, price)
+                    update_series_with_trade(cs_5m, trade_ms, price)
+                    update_series_with_trade(cs_15m, trade_ms, price)
+
+                    roll_15m_start = bucket_start_ms(trade_ms, TF_15M_MS)
+                    if last_roll_15m_start == 0:
+                        last_roll_15m_start = roll_15m_start
+
+                    if roll_15m_start != last_roll_15m_start:
+                        last_roll_15m_start = roll_15m_start
+                        state.driver.strike = price
+
+                        a1 = atr2_from_last3(cs_1m.closed)
+                        a5 = atr2_from_last3(cs_5m.closed)
+                        a15 = atr2_from_last3(cs_15m.closed)
+
+                        if a1 > 0.0:
+                            state.driver.atr_1m = a1
+                        if a5 > 0.0:
+                            state.driver.atr_5m = a5
+                        if a15 > 0.0:
+                            state.driver.atr_15m = a15
 
                     prev = state.driver.last
                     state.driver.last = price
@@ -77,12 +114,6 @@ async def binance_ws_task(state: AppState, logger: AsyncJsonlLogger, symbol: str
 
                     if state.driver.strike == 0.0:
                         state.driver.strike = price
-
-                    qty = float(parsed["qty"])
-                    is_buyer_maker = bool(parsed["is_buyer_maker"])
-
-                    trade_ts_ms = float(parsed["trade_ts_ms"])
-                    trade_ms = trade_ts_ms if trade_ts_ms > 0.0 else now_ms()
 
                     update_tape_on_trade(
                         state.tape_driver,
