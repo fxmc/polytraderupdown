@@ -54,6 +54,71 @@ class BurstState:
     sec_open_px: float = 0.0
     sec_move_px: float = 0.0
 
+    sec_buy_qty: float = 0.0
+    sec_sell_qty: float = 0.0
+    sec_buy_notional: float = 0.0
+    sec_sell_notional: float = 0.0
+
+    buy_qty_5s: float = 0.0
+    sell_qty_5s: float = 0.0
+    buy_notional_5s: float = 0.0
+    sell_notional_5s: float = 0.0
+
+    pressure_bins_5s: Deque[tuple[float, float, float, float]] = field(default_factory=lambda: deque(maxlen=5))
+
+
+def reset_sec_pressure(tape: "BurstState") -> None:
+    """Reset current-second pressure counters."""
+    tape.sec_buy_qty = 0.0
+    tape.sec_sell_qty = 0.0
+    tape.sec_buy_notional = 0.0
+    tape.sec_sell_notional = 0.0
+
+
+def roll_pressure_second(tape: "BurstState") -> None:
+    """
+    Roll the completed second's pressure into the 5-second window (O(1)).
+
+    We manage pops explicitly so we can subtract the dropped bin from rolling sums.
+    """
+    if len(tape.pressure_bins_5s) == tape.pressure_bins_5s.maxlen:
+        old = tape.pressure_bins_5s.popleft()
+        tape.buy_qty_5s -= float(old[0])
+        tape.sell_qty_5s -= float(old[1])
+        tape.buy_notional_5s -= float(old[2])
+        tape.sell_notional_5s -= float(old[3])
+
+    tape.pressure_bins_5s.append(
+        (tape.sec_buy_qty, tape.sec_sell_qty, tape.sec_buy_notional, tape.sec_sell_notional)
+    )
+    tape.buy_qty_5s += tape.sec_buy_qty
+    tape.sell_qty_5s += tape.sec_sell_qty
+    tape.buy_notional_5s += tape.sec_buy_notional
+    tape.sell_notional_5s += tape.sec_sell_notional
+
+
+def update_pressure_trade(
+    tape: "BurstState",
+    price: float,
+    qty: float,
+    is_buyer_maker: bool,
+) -> None:
+    """
+    Update current-second pressure totals for one trade.
+
+    Binance isBuyerMaker:
+    - False => buyer is taker => BUY aggressor
+    - True  => buyer is maker => SELL aggressor
+    """
+    notional = float(price) * float(qty)
+
+    if is_buyer_maker:
+        tape.sec_sell_qty += float(qty)
+        tape.sec_sell_notional += notional
+    else:
+        tape.sec_buy_qty += float(qty)
+        tape.sec_buy_notional += notional
+
 
 def make_driver_tape() -> BurstState:
     """Create the Binance tape (20 lines)."""
@@ -62,7 +127,7 @@ def make_driver_tape() -> BurstState:
 
 def make_resolver_tape() -> BurstState:
     """Create the Polymarket tape (5 lines)."""
-    return BurstState(lines=deque(maxlen=5))
+    return BurstState(lines=deque(maxlen=3))
 
 
 @dataclass(slots=True)
@@ -76,14 +141,34 @@ class DriverHeaderState:
     vol_30s: float = 0.0
     vol_1m: float = 0.0
     vol_5m: float = 0.0
-    mom_30s: float = 0.0
-    mom_1m: float = 0.0
-    mom_5m: float = 0.0
     fv_yes: float = 0.0
     fv_no: float = 0.0
     atr_1m: float = 0.0
     atr_5m: float = 0.0
     atr_15m: float = 0.0
+    mom_5s: float = 0.0
+    mom_10s: float = 0.0
+    mom_15s: float = 0.0
+    mom_30s: float = 0.0
+    mom_1m: float = 0.0
+    mom_5m: float = 0.0
+
+    mom_5s_pct: float = 0.0
+    mom_10s_pct: float = 0.0
+    mom_15s_pct: float = 0.0
+    mom_30s_pct: float = 0.0
+    mom_1m_pct: float = 0.0
+    mom_5m_pct: float = 0.0
+
+    mom_z_5s: float = 0.0
+    mom_z_10s: float = 0.0
+    mom_z_15s: float = 0.0
+    mom_z_30s: float = 0.0
+    mom_z_1m: float = 0.0
+
+    mom_z_combo_fast: float = 0.0
+    mom_z_combo_slow: float = 0.0
+
 
 
 @dataclass(slots=True)
@@ -205,7 +290,7 @@ def update_rate_from_second_bucket(tape: "BurstState", trade_ms: float) -> None:
     tape.rate_ewma = inst if tape.rate_ewma <= 0.0 else (1.0 - BURST_ALPHA) * tape.rate_ewma + BURST_ALPHA * inst
 
 
-def update_second_bucket(tape: "BurstState", trade_ms: float, price: float) -> None:
+def update_second_bucket(tape: "BurstState", trade_ms: float, price: float, qty: float, is_buyer_maker: bool) -> None:
     """
     Update per-second counters and second-level move.
 
@@ -222,18 +307,23 @@ def update_second_bucket(tape: "BurstState", trade_ms: float, price: float) -> N
         tape.rate_ewma = 0.0
         tape.sec_open_px = price
         tape.sec_move_px = 0.0
+        reset_sec_pressure(tape)
 
     if sec != tape.last_sec:
+        roll_pressure_second(tape)
         tape.last_sec = sec
         tape.sec_count = 0
         tape.sec_open_px = price
         tape.sec_move_px = 0.0
+        reset_sec_pressure(tape)
 
     tape.sec_count += 1
     tape.sec_move_px = price - tape.sec_open_px
 
     inst = float(tape.sec_count)
     tape.rate_ewma = inst if tape.rate_ewma <= 0.0 else (1.0 - BURST_ALPHA) * tape.rate_ewma + BURST_ALPHA * inst
+
+    update_pressure_trade(tape, price, qty, is_buyer_maker)
 
 
 BIG_MOVE_PX: float = 35.0  # you can tune
@@ -266,6 +356,33 @@ def maybe_highlight_line(s: str, burst_level: int) -> str:
     return s
 
 
+def pressure_imbalance_notional_5s(tape: "BurstState") -> float:
+    """Return 5-second signed notional imbalance in [-1,+1]."""
+    b = tape.buy_notional_5s
+    s = tape.sell_notional_5s
+    denom = b + s
+    if denom <= 1e-12:
+        return 0.0
+    return (b - s) / denom
+
+
+def pressure_imbalance_notional_5s_live(tape: "BurstState") -> float:
+    """
+    Return signed notional imbalance over the last ~5 seconds,
+    INCLUDING the current (partial) second.
+
+    Result is in [-1, +1].
+    """
+    buy = tape.buy_notional_5s + tape.sec_buy_notional
+    sell = tape.sell_notional_5s + tape.sec_sell_notional
+
+    denom = buy + sell
+    if denom <= 1e-12:
+        return 0.0
+
+    return (buy - sell) / denom
+
+
 def format_tape_line(
     price: float,
     d_last: float,
@@ -276,6 +393,7 @@ def format_tape_line(
     burst_level: int,
     is_buyer_maker: bool,
     sec_move_px: float,
+    p5: float
 ) -> str:
     """Format one tape line with run counters and burst indicator."""
     t = time.strftime("%H:%M:%S")
@@ -338,7 +456,7 @@ def update_tape_on_trade(
     #     tape.burst_until_ms,
     # )
 
-    update_second_bucket(tape, trade_ms, price)
+    update_second_bucket(tape, trade_ms, price, qty, is_buyer_maker)
 
     tape.burst_level, tape.burst_until_ms = update_burst_gate(
         tape.burst_level,
@@ -349,6 +467,8 @@ def update_tape_on_trade(
 
     if tape.last_px <= 0.0:
         tape.last_px = price
+
+    p5 = pressure_imbalance_notional_5s(tape)
 
     if price != tape.last_px or not tape.lines:
         tape.last_px = price
@@ -365,6 +485,7 @@ def update_tape_on_trade(
                 tape.burst_level,
                 is_buyer_maker,
                 tape.sec_move_px,
+                p5
             )
         )
         return
@@ -381,4 +502,5 @@ def update_tape_on_trade(
         tape.burst_level,
         is_buyer_maker,
         tape.sec_move_px,
+        p5
     )

@@ -8,7 +8,7 @@ from typing import List
 
 from prompt_toolkit.formatted_text import ANSI
 
-from state import AppState, OrderbookLevel
+from state import AppState, OrderbookLevel, pressure_imbalance_notional_5s_live
 
 
 def fv_indicator_ansi(fv: float, mid: float) -> str:
@@ -207,10 +207,36 @@ def render_right_top(state: AppState, height: int) -> ANSI:
     lines.append(f"BINANCE {d.symbol} (DRIVER)")
     lines.append(f"lag_ms: {d.lag_ms:0.0f}")
     lines.append(f"vol(30s/1m/5m): {d.vol_30s:7.4f} / {d.vol_1m:7.4f} / {d.vol_5m:7.4f}")
-    lines.append(f"mom(30s/1m/5m): {d.mom_30s:+0.4f} / {d.mom_1m:+0.4f} / {d.mom_5m:+0.4f}")
-    lines.append(f"ATR2 bands  1m: ±{d.atr_1m:10.2f}")
-    lines.append(f"ATR2 bands  5m: ±{d.atr_5m:10.2f}")
-    lines.append(f"ATR2 bands 15m: ±{d.atr_15m:10.2f}")
+
+    lines.append(
+        "mom pts(%): "
+        f"5s {d.mom_5s:+7.2f}({d.mom_5s_pct:+0.3f}%)  "
+        f"10s {d.mom_10s:+7.2f}({d.mom_10s_pct:+0.3f}%)  "
+        f"15s {d.mom_15s:+7.2f}({d.mom_15s_pct:+0.3f}%)"
+    )
+    lines.append(
+        "           "
+        f"30s {d.mom_30s:+7.2f}({d.mom_30s_pct:+0.3f}%)  "
+        f" 1m {d.mom_1m:+7.2f}({d.mom_1m_pct:+0.3f}%)  "
+        f" 5m {d.mom_5m:+7.2f}({d.mom_5m_pct:+0.3f}%)"
+    )
+    lines.append(
+        f"mom z          : fast {d.mom_z_combo_fast:+0.2f}  slow {d.mom_z_combo_slow:+0.2f}"
+    )
+    lines.append(
+        f"z 5/10/15/30/1m: {d.mom_z_5s:+0.2f} {d.mom_z_10s:+0.2f} {d.mom_z_15s:+0.2f} {d.mom_z_30s:+0.2f} {d.mom_z_1m:+0.2f}"
+    )
+    p5 = pressure_imbalance_notional_5s_live(state.tape_driver)
+    b = state.tape_driver.buy_notional_5s + state.tape_driver.sec_buy_notional
+    s = state.tape_driver.sell_notional_5s + state.tape_driver.sec_sell_notional
+
+    lines.append(
+        f"pressure(5s)   : {p5:+0.2f}  B {b:,.0f}  S {s:,.0f}"
+    )
+
+    lines.append(f"ATR2 bands  1m : ±{d.atr_1m:10.2f}")
+    lines.append(f"ATR2 bands  5m : ±{d.atr_5m:10.2f}")
+    lines.append(f"ATR2 bands 15m : ±{d.atr_15m:10.2f}")
     lines.append("-" * 72)
     lines.append("BURST TAPE (newest first)")
 
@@ -235,9 +261,6 @@ def render_right_bottom(state: AppState, height: int) -> ANSI:
     lines: List[str] = []
     lines.append("POLYMARKET CRYPTO (RESOLVER / LAGGING)")
     lines.append(f"lag_ms: {r.lag_ms:0.0f}")
-    lines.append(f"vol(30s/1m/5m): {r.vol_30s:7.4f} / {r.vol_1m:7.4f} / {r.vol_5m:7.4f}")
-    lines.append(f"mom(30s/1m/5m): {r.mom_30s:+0.4f} / {r.mom_1m:+0.4f} / {r.mom_5m:+0.4f}")
-
     lines.append("-" * 72)
     lines.append("BURST TAPE (newest first)")
 
@@ -248,6 +271,5 @@ def render_right_bottom(state: AppState, height: int) -> ANSI:
     lines.append(f"strike: {strike:10.2f}")
     lines.append(f"last  : {r.last:10.2f}")
     lines.append(f"dist  : {dist:+10.2f}")
-    lines.append(f"d_last: {r.d_last:+10.2f}")
 
     return fit_to_height(lines, height)
