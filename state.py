@@ -17,6 +17,84 @@ class OrderbookLevel:
     sz: float
 
 
+# --- add to state.py ---
+@dataclass(slots=True)
+class L1SideMetrics:
+    # last observed L1 (for delta logic)
+    bid_px: float = 0.0
+    bid_sz: float = 0.0
+    ask_px: float = 0.0
+    ask_sz: float = 0.0
+
+    # timestamps
+    last_update_ms: float = 0.0
+    bid_last_change_ms: float = 0.0
+    ask_last_change_ms: float = 0.0
+
+    # age (derived at render time, but handy to precompute if you want)
+    # bid_age_ms / ask_age_ms can be derived as now_ms - last_change_ms
+
+    # depletion/refill EWMAs (units: size per second)
+    bid_dep_ema: float = 0.0
+    bid_refill_ema: float = 0.0
+    ask_dep_ema: float = 0.0
+    ask_refill_ema: float = 0.0
+
+    # flicker EWMAs (units: changes per second)
+    bid_flicker_ema: float = 0.0
+    ask_flicker_ema: float = 0.0
+
+    # microprice diagnostics (L1 only)
+    mid: float = 0.0
+    spread: float = 0.0
+    micro: float = 0.0
+    micro_bias: float = 0.0  # (micro-mid)/spread, 0 if spread<=0
+
+    danger_bid: float = 0.0
+    danger_ask: float = 0.0
+
+
+@dataclass(slots=True)
+class BookMetricsState:
+    yes: L1SideMetrics = field(default_factory=L1SideMetrics)
+    no: L1SideMetrics = field(default_factory=L1SideMetrics)
+
+
+@dataclass(slots=True)
+class CanonicalBookMetrics:
+    # Canonical mid/spread in YES-probability space
+    mid: float = 0.0
+    spread: float = 0.0
+
+    # Mid velocity EWMA (abs Δmid / s)
+    mid_prev: float = 0.0
+    mid_prev_ms: float = 0.0
+    mid_vel_ema: float = 0.0
+
+    # Touch-cross risk in [0,1]
+    touch_cross_risk: float = 0.0
+
+
+@dataclass(slots=True)
+class AlignState:
+    # Binance impulse -> CLOB response latency (single canonical metric)
+    pending: bool = False
+    impulse_ms: float = 0.0
+    dir: int = 0                 # +1 for up impulse, -1 for down
+    mid0: float = 0.0
+    spread0: float = 0.0
+    expires_ms: float = 0.0
+
+    resp_last_ms: float = 0.0
+    resp_ema_ms: float = 0.0
+
+    n_impulses: int = 0
+    n_matched: int = 0
+    n_missed: int = 0
+
+    last_resp_update_ms: float = 0.0
+
+
 @dataclass(slots=True)
 class OrderbookState:
     """Orderbook for YES and NO, each with bids and asks (L1–L5)."""
@@ -43,6 +121,10 @@ class OrderbookState:
     # --- lag diagnostics (NEW) ---
     lag_ms: float = 0.0   # last book message lag (ingest_ms - event_ms)
     lag_raw_ms: float = 0.0
+
+    metrics: BookMetricsState = field(default_factory=BookMetricsState)
+
+    canon: CanonicalBookMetrics = field(default_factory=CanonicalBookMetrics)
 
 
 @dataclass(slots=True)
@@ -249,6 +331,7 @@ class AppState:
     tape_driver: BurstState = field(default_factory=make_driver_tape)
     tape_resolver: BurstState = field(default_factory=make_resolver_tape)
     diag: DiagState = field(default_factory=DiagState)
+    align: AlignState = field(default_factory=AlignState)
 
 
 def now_ms() -> float:

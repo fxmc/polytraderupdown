@@ -5,7 +5,7 @@ Configuration constants for the terminal dashboard.
 from __future__ import annotations
 
 
-LEFT_W: int = 75
+LEFT_W: int = 100
 
 UI_HZ: float = 20.0
 

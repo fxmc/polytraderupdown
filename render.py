@@ -8,8 +8,7 @@ from typing import List
 
 from prompt_toolkit.formatted_text import ANSI
 
-from state import AppState, OrderbookLevel, pressure_imbalance_notional_5s_live
-
+from state import AppState, OrderbookLevel, pressure_imbalance_notional_5s_live, now_ms
 
 # --- ANSI color helpers ---
 RESET = "\x1b[0m"
@@ -59,6 +58,13 @@ def format_px_sz_cum_header(px_w: int, sz_w: int, cum_w: int, prefix: str) -> st
 def format_px_sz_cum_sep(px_w: int, sz_w: int, cum_w: int, prefix: str) -> str:
     """Separator aligned to px/sz/cum columns."""
     return f"{prefix}{'-'*px_w} {'-'*sz_w} {'-'*cum_w}"
+
+
+def _fmt_age(now_ms: float, last_ms: float) -> float:
+    if last_ms <= 0.0:
+        return 0.0
+    v = now_ms - last_ms
+    return v if v > 0.0 else 0.0
 
 
 def format_level_row(
@@ -165,6 +171,15 @@ def render_left(state: AppState, height: int) -> ANSI:
     lines: List[str] = []
     lines.append(f"PM CLOB (LEFT) | MODE: {mode}   (d toggle, q quit)")
     lines.append(f"skew     : {state.diag.clock_offset_ms:4.0f}ms  ({getattr(state.diag, 'clock_offset_src', '')})")
+    # --- Binance -> CLOB response (canonical, mirror-safe) ---
+    a = state.align
+    pend = "*" if a.pending else "."
+    lines.append(
+        f"B→CLOB resp: last {a.resp_last_ms:4.0f}ms  ema {a.resp_ema_ms:4.0f}ms  pend {pend}  n {a.n_impulses}/{a.n_matched} miss {a.n_missed}"
+    )
+    lines.append(
+        f"align dbg : canon_mid {state.book.canon.mid:0.4f}  sec_move {state.tape_driver.sec_move_px:+6.2f}  atr1m {state.driver.atr_1m:0.2f}"
+    )
 
     lines.append("-" * 60)
 
@@ -226,7 +241,7 @@ def render_left(state: AppState, height: int) -> ANSI:
         no_spread = 0.0
         no_mid = 0.0
 
-    lines.append(f"updates   : {state.book.updates}   lag : {state.book.lag_ms:0.0f}ms   raw lag: {state.book.lag_raw_ms}ms")
+    lines.append(f"updates   : {state.book.updates}   lag : {state.book.lag_ms:0.0f}ms   raw lag: {state.book.lag_raw_ms:0.0f}ms")
     if state.book.market_slug and state.book.question:
         lines.append(f"market    : {state.book.market_slug}")
         lines.append(f"title     : {state.book.question}")
@@ -237,7 +252,43 @@ def render_left(state: AppState, height: int) -> ANSI:
     n_l1 = size_imbalance(state.book.no_bids, state.book.no_asks, 1)
     n_l5 = size_imbalance(state.book.no_bids, state.book.no_asks, 5)
 
-    lines.append(f"imbalance : YES L1 {y_l1:+0.2f}  L5 {y_l5:+0.2f}   |   NO L1 {n_l1:+0.2f}  L5 {n_l5:+0.2f}")
+    imbalance_yes = f"imbalance : UP L1 {y_l1:+0.2f}  L5 {y_l5:+0.2f}"
+    imbalance_no =  f"imbalance : DOWN  L1 {n_l1:+0.2f}  L5 {n_l5:+0.2f}"
+    # lines.append(f"imbalance : YES L1 {y_l1:+0.2f}  L5 {y_l5:+0.2f}   |   NO L1 {n_l1:+0.2f}  L5 {n_l5:+0.2f}")
+    nowv = now_ms()
+
+    ym = state.book.metrics.yes
+    nm = state.book.metrics.no
+
+    y_bid_age = _fmt_age(nowv, ym.bid_last_change_ms)
+    y_ask_age = _fmt_age(nowv, ym.ask_last_change_ms)
+    n_bid_age = _fmt_age(nowv, nm.bid_last_change_ms)
+    n_ask_age = _fmt_age(nowv, nm.ask_last_change_ms)
+
+    x = state.book.canon.touch_cross_risk
+
+    # line 1: micro-bias + spread
+    left1  = f"micro(bias) UP    {ym.micro_bias:+0.2f}  spr {ym.spread:0.4f}"
+    right1 = f"micro(bias) DOWN     {nm.micro_bias:+0.2f}  spr {nm.spread:0.4f}"
+    # lines.append(format_split_line(left1, right1, left_width))
+    # line 2: depletion + age + flicker
+    left2  = f"dep b/a {ym.bid_dep_ema:5.1f}/{ym.ask_dep_ema:5.1f}  age b/a {y_bid_age:4.0f}/{y_ask_age:4.0f}ms  flick {ym.bid_flicker_ema:4.1f}/{ym.ask_flicker_ema:4.1f}/s  D b/a {ym.danger_bid:0.2f}/{ym.danger_ask:0.2f}  X {x:0.2f}"
+    right2 = f"dep b/a {nm.bid_dep_ema:5.1f}/{nm.ask_dep_ema:5.1f}  age b/a {n_bid_age:4.0f}/{n_ask_age:4.0f}ms  flick {nm.bid_flicker_ema:4.1f}/{nm.ask_flicker_ema:4.1f}/s  D b/a {nm.danger_bid:0.2f}/{nm.danger_ask:0.2f}  X {x:0.2f}"
+    # lines.append(format_split_line(left2, right2, left_width))
+
+    lines.append("")
+    lines.append("UP")
+    lines.append("=======")
+    lines.append(imbalance_yes)
+    lines.append(left1)
+    lines.append(left2)
+
+    lines.append("")
+    lines.append("DOWN")
+    lines.append("=======")
+    lines.append(imbalance_no)
+    lines.append(right1)
+    lines.append(right2)
 
     yes_badge = fv_indicator_ansi(state.book.fv_yes, yes_mid)
     no_badge = fv_indicator_ansi(state.book.fv_no, no_mid)
@@ -248,17 +299,16 @@ def render_left(state: AppState, height: int) -> ANSI:
     lines.append("")
     lines.append("With Drift")
     lines.append("==========")
-    lines.append(f"YES spread: {yes_spread:0.4f} mid: {yes_mid:0.4f}  FV: {state.book.fv_yes:0.4f}  {yes_badge}")
-    lines.append(f"NO  spread: {no_spread:0.4f} mid: {no_mid:0.4f}  FV: {state.book.fv_no:0.4f}  {no_badge}")
+    lines.append(f"UP    mid: {yes_mid:0.4f}  FV: {state.book.fv_yes:0.4f}  {yes_badge}")
+    lines.append(f"DOWN  mid: {no_mid:0.4f}  FV: {state.book.fv_no:0.4f}  {no_badge}")
     lines.append("")
     lines.append("Without Drift")
     lines.append("=============")
-    lines.append(f"YES spread: {yes_spread:0.4f} mid: {yes_mid:0.4f}  FV: {state.book.fv_yes_nd:0.4f}  {yes_badge_nd}")
-    lines.append(f"NO  spread: {no_spread:0.4f} mid: {no_mid:0.4f}  FV: {state.book.fv_no_nd:0.4f}  {no_badge_nd}")
+    lines.append(f"UP    mid: {yes_mid:0.4f}  FV: {state.book.fv_yes_nd:0.4f}  {yes_badge_nd}")
+    lines.append(f"DOWN  mid: {no_mid:0.4f}  FV: {state.book.fv_no_nd:0.4f}  {no_badge_nd}")
 
+    lines.append("")
     lines.append(f"pulse     : {state.book.pulse}")
-    lines.append(f"last_ Δ_ms: {state.book.last_change_ms:0.0f}")
-
     lines.append(f"loop drift: {state.diag.loop_drift_ms:5.1f}ms  worst {state.diag.loop_drift_worst_ms:5.1f}ms  ")
     lines.append(f"apply ms: B {state.diag.binance_apply_ms:4.1f}  CLOB {state.diag.clob_apply_ms:4.1f}  RTDS {state.diag.rtds_apply_ms:4.1f}")
 

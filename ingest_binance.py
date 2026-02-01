@@ -241,6 +241,30 @@ async def binance_ws_task(state: AppState, logger: AsyncJsonlLogger, symbol: str
                         p_yes_nd = digital_prob_lognormal(price, state.driver.strike, sigma_rem)
                         state.driver.p_yes_nd = p_yes_nd
 
+                        # --- Binance -> CLOB alignment impulse (1Hz, bounded) ---
+                        a = state.align
+                        if not a.pending:
+                            # thr_pts = max(0.00020 * price, 0.25 * float(state.driver.atr_1m))
+                            thr_pts = max(0.00025 * price, 0.25 * float(state.driver.atr_1m), 5.0)
+
+                            # IMPORTANT: use 1-second move, not last tick move
+                            sec_move = float(state.tape_driver.sec_move_px)
+                            imp = abs(sec_move)
+
+                            if imp >= thr_pts:
+                                mid0 = float(state.book.canon.mid)
+                                sp0 = float(state.book.canon.spread)
+
+                                if mid0 > 0.0:
+                                    a.pending = True
+                                    a.impulse_ms = recv_ms
+                                    a.dir = 1 if sec_move > 0.0 else -1
+                                    a.mid0 = mid0
+                                    a.spread0 = sp0
+                                    # a.expires_ms = recv_ms + 2000.0
+                                    a.expires_ms = recv_ms + 4000.0
+                                    a.n_impulses += 1
+
                         # --- metrics logging (1Hz) ---
                         logger.log(
                             {

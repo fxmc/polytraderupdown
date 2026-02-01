@@ -39,6 +39,134 @@ from state import AppState, OrderbookLevel
 from candles import TF_15M_MS, bucket_start_ms
 from config import PM_COIN_BY_BINANCE
 from resolve_polymarket_market import build_15m_slug, resolve_market_by_slug
+from maker_metrics import danger_score_bid, danger_score_ask
+
+# --- add to ingest_polymarket_clob.py ---
+
+import math
+from state import L1SideMetrics  # after you add it in state.py
+
+
+def _ewma_dt(prev: float, x: float, dt_s: float, tau_s: float) -> float:
+    """
+    dt-aware EWMA using time-constant tau_s:
+      alpha = 1 - exp(-dt/tau)
+    """
+    if dt_s <= 0.0:
+        return prev
+    if tau_s <= 1e-9:
+        return x
+    a = 1.0 - math.exp(-dt_s / tau_s)
+    return (1.0 - a) * prev + a * x
+
+
+def _update_l1_metrics(m: L1SideMetrics, bids, asks, recv_ms: float) -> None:
+    """
+    Update depletion/refill, microprice bias, quote age markers, flicker rate.
+    Constant-time; uses only L1 bid/ask if present.
+    """
+    # compute dt from last update (observed time)
+    dt_s = 0.0
+    if m.last_update_ms > 0.0 and recv_ms > m.last_update_ms:
+        dt_s = (recv_ms - m.last_update_ms) / 1000.0
+    m.last_update_ms = recv_ms
+
+    # grab L1
+    bid_px = bids[0].px if bids else 0.0
+    bid_sz = bids[0].sz if bids else 0.0
+    ask_px = asks[0].px if asks else 0.0
+    ask_sz = asks[0].sz if asks else 0.0
+
+    # --- quote age + flicker (price changes only) ---
+    bid_changed = (bid_px > 0.0 and bid_px != m.bid_px)
+    ask_changed = (ask_px > 0.0 and ask_px != m.ask_px)
+
+    if m.bid_last_change_ms <= 0.0 and bid_px > 0.0:
+        m.bid_last_change_ms = recv_ms
+    if m.ask_last_change_ms <= 0.0 and ask_px > 0.0:
+        m.ask_last_change_ms = recv_ms
+
+    if bid_changed:
+        m.bid_last_change_ms = recv_ms
+    if ask_changed:
+        m.ask_last_change_ms = recv_ms
+
+    # flicker inst: changes/sec (1 change over dt) else 0
+    # tau picks how "sticky" we want the regime detector to be
+    tau_flicker = 2.0
+    if dt_s > 0.0:
+        m.bid_flicker_ema = _ewma_dt(m.bid_flicker_ema, (1.0 / dt_s) if bid_changed else 0.0, dt_s, tau_flicker)
+        m.ask_flicker_ema = _ewma_dt(m.ask_flicker_ema, (1.0 / dt_s) if ask_changed else 0.0, dt_s, tau_flicker)
+
+    # --- depletion/refill: only meaningful if price is same queue ---
+    # If price changed, treat as new queue and reset baseline.
+    tau_dep = 2.0
+
+    # BID: depletion when size shrinks
+    if bid_px > 0.0:
+        if (not bid_changed) and m.bid_px == bid_px and dt_s > 0.0:
+            dsz = bid_sz - m.bid_sz
+            dep = max(0.0, -dsz) / dt_s
+            ref = max(0.0,  dsz) / dt_s
+            m.bid_dep_ema = _ewma_dt(m.bid_dep_ema, dep, dt_s, tau_dep)
+            m.bid_refill_ema = _ewma_dt(m.bid_refill_ema, ref, dt_s, tau_dep)
+        # baseline
+        m.bid_px = bid_px
+        m.bid_sz = bid_sz
+    else:
+        m.bid_px = 0.0
+        m.bid_sz = 0.0
+
+    # ASK
+    if ask_px > 0.0:
+        if (not ask_changed) and m.ask_px == ask_px and dt_s > 0.0:
+            dsz = ask_sz - m.ask_sz
+            dep = max(0.0, -dsz) / dt_s
+            ref = max(0.0,  dsz) / dt_s
+            m.ask_dep_ema = _ewma_dt(m.ask_dep_ema, dep, dt_s, tau_dep)
+            m.ask_refill_ema = _ewma_dt(m.ask_refill_ema, ref, dt_s, tau_dep)
+        m.ask_px = ask_px
+        m.ask_sz = ask_sz
+    else:
+        m.ask_px = 0.0
+        m.ask_sz = 0.0
+
+    # --- microprice vs mid (normalized) ---
+    if bid_px > 0.0 and ask_px > 0.0:
+        spread = ask_px - bid_px
+        mid = 0.5 * (bid_px + ask_px)
+        m.mid = mid
+        m.spread = spread
+        denom = bid_sz + ask_sz
+        if denom > 0.0:
+            micro = (ask_px * bid_sz + bid_px * ask_sz) / denom
+        else:
+            micro = mid
+        m.micro = micro
+        m.micro_bias = 0.0 if spread <= 0.0 else (micro - mid) / spread
+    else:
+        m.mid = 0.0
+        m.spread = 0.0
+        m.micro = 0.0
+        m.micro_bias = 0.0
+
+    # --- maker danger score (O(1)) ---
+    try:
+        m.danger_bid, _ = danger_score_bid(
+            dep_ema=m.bid_dep_ema,
+            flicker_ema=m.bid_flicker_ema,
+            spread=m.spread,
+            micro_bias=m.micro_bias,
+        )
+        m.danger_ask, _ = danger_score_ask(
+            dep_ema=m.ask_dep_ema,
+            flicker_ema=m.ask_flicker_ema,
+            spread=m.spread,
+            micro_bias=m.micro_bias,
+        )
+    except Exception:
+        # keep last values if import fails / during dev
+        pass
 
 
 def _now_ms() -> float:
@@ -64,6 +192,106 @@ async def _app_ping_loop(ws: websockets.WebSocketClientProtocol, every_s: float)
     except Exception:
         # Let the main stream loop handle reconnect.
         return
+
+
+def _canon_mid_spread(state: AppState) -> tuple[float, float]:
+    """
+    Canonical mid/spread in YES-probability space.
+
+    Mirror invariant:
+      YES mid = 1 - NO mid
+      spread is identical
+    """
+    # Prefer YES if present
+    if state.book.yes_bids and state.book.yes_asks:
+        bid = float(state.book.yes_bids[0].px)
+        ask = float(state.book.yes_asks[0].px)
+        sp = ask - bid
+        mid = 0.5 * (bid + ask)
+        return mid, sp if sp > 0.0 else 0.0
+
+    # Fallback to NO (mirror-map into YES space)
+    if state.book.no_bids and state.book.no_asks:
+        bid = float(state.book.no_bids[0].px)
+        ask = float(state.book.no_asks[0].px)
+        sp = ask - bid
+        mid_no = 0.5 * (bid + ask)
+        mid_yes = 1.0 - mid_no
+        return mid_yes, sp if sp > 0.0 else 0.0
+
+    return 0.0, 0.0
+
+
+def _update_canon_metrics(state: AppState, recv_ms: float) -> None:
+    """
+    Update canonical mid/spread + mid velocity EWMA + touch-cross risk.
+    O(1), called on every book snapshot apply.
+    """
+    mid, spread = _canon_mid_spread(state)
+    c = state.book.canon
+    c.mid = mid
+    c.spread = spread
+
+    # velocity EWMA
+    dt_s = 0.0
+    if c.mid_prev_ms > 0.0 and recv_ms > c.mid_prev_ms:
+        dt_s = (recv_ms - c.mid_prev_ms) / 1000.0
+
+    if dt_s > 0.0 and c.mid_prev > 0.0 and mid > 0.0:
+        mid_vel_inst = abs(mid - c.mid_prev) / dt_s  # price units / s
+        # tau=1.5s is a good default for "touch cross" risk
+        c.mid_vel_ema = _ewma_dt(c.mid_vel_ema, mid_vel_inst, dt_s, tau_s=1.5)
+    elif c.mid_vel_ema <= 0.0:
+        c.mid_vel_ema = 0.0
+
+    c.mid_prev = mid
+    c.mid_prev_ms = recv_ms
+
+    # touch-cross risk: (vel * tau)/spread, squashed to [0,1]
+    sp = max(1e-9, spread)
+    intensity = (c.mid_vel_ema * 1.5) / sp if mid > 0.0 else 0.0
+    c.touch_cross_risk = 0.0 if intensity <= 0.0 else (intensity / (1.0 + intensity))
+
+
+def _maybe_match_align(state: AppState, recv_ms: float) -> None:
+    a = state.align
+    if not a.pending:
+        return
+
+    if recv_ms > a.expires_ms:
+        a.pending = False
+        a.n_missed += 1
+        return
+
+    mid = state.book.canon.mid
+    if mid <= 0.0 or a.mid0 <= 0.0 or a.dir == 0:
+        return
+
+    # threshold: at least half-spread or 1 tick
+    # thr = max(0.001, 0.5 * max(0.0, a.spread0))
+    thr = 0.005  # one mid-step for a 0.01 tick market
+
+    d_mid = mid - a.mid0
+
+    if a.dir * d_mid >= thr:
+        resp = recv_ms - a.impulse_ms
+        if resp < 0.0:
+            resp = 0.0
+
+        a.resp_last_ms = resp
+
+        # dt-aware EWMA for response latency (tau ~ 3s)
+        if a.resp_ema_ms <= 0.0 or a.last_resp_update_ms <= 0.0:
+            a.resp_ema_ms = resp
+        else:
+            dt_s = (recv_ms - a.last_resp_update_ms) / 1000.0
+            a.resp_ema_ms = _ewma_dt(a.resp_ema_ms, resp, dt_s=dt_s, tau_s=3.0)
+
+        a.last_resp_update_ms = recv_ms
+
+        a.pending = False
+        a.n_matched += 1
+
 
 
 def _to_levels_best_first(levels: Any, n: int) -> List[OrderbookLevel]:
@@ -155,11 +383,16 @@ def _apply_book_snapshot(
     if asset_id == yes_asset_id:
         state.book.yes_bids = b
         state.book.yes_asks = a
+        _update_l1_metrics(state.book.metrics.yes, state.book.yes_bids, state.book.yes_asks, recv_ms)
     elif asset_id == no_asset_id:
         state.book.no_bids = b
         state.book.no_asks = a
+        _update_l1_metrics(state.book.metrics.no, state.book.no_bids, state.book.no_asks, recv_ms)
     else:
         return
+
+    _update_canon_metrics(state, recv_ms)
+    _maybe_match_align(state, recv_ms)
 
     state.book.updates += 1
     state.book.pulse = "*" if (state.book.updates % 2 == 0) else "."

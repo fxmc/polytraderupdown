@@ -26,6 +26,7 @@ from config import (
     BINANCE_SYMBOL_DEFAULT,
 )
 from ingest_binance import binance_ws_task
+from maker_metrics import danger_score_bid, danger_score_ask
 from raw_logger import AsyncJsonlLogger
 from state import AppState, OrderbookLevel, push_burst_line
 from ui import build_keybindings, build_layout, ui_refresh_loop
@@ -196,8 +197,6 @@ async def run_app(
 
     asyncio.create_task(polymarket_rtds_task(state, logger, binance_symbol=symbol))
     asyncio.create_task(binance_ws_task(state, logger, symbol=symbol))
-    asyncio.create_task(polymarket_rtds_task(state, logger, binance_symbol=symbol))
-    asyncio.create_task(binance_ws_task(state, logger, symbol=symbol))
     asyncio.create_task(metrics_1hz_task(state, logger))
     asyncio.create_task(loop_drift_task(state))
     asyncio.create_task(cloudflare_ntp_offset_task(state, every_s=120.0))
@@ -221,6 +220,38 @@ async def metrics_1hz_task(state: AppState, logger: AsyncJsonlLogger) -> None:
 
         ts = time.time() * 1000.0
 
+        y = state.book.metrics.yes
+        n = state.book.metrics.no
+
+        # YES components
+        y_db, y_db_c = danger_score_bid(
+            dep_ema=y.bid_dep_ema,
+            flicker_ema=y.bid_flicker_ema,
+            spread=y.spread,
+            micro_bias=y.micro_bias,
+        )
+        y_da, y_da_c = danger_score_ask(
+            dep_ema=y.ask_dep_ema,
+            flicker_ema=y.ask_flicker_ema,
+            spread=y.spread,
+            micro_bias=y.micro_bias,
+        )
+
+        # NO components
+        n_db, n_db_c = danger_score_bid(
+            dep_ema=n.bid_dep_ema,
+            flicker_ema=n.bid_flicker_ema,
+            spread=n.spread,
+            micro_bias=n.micro_bias,
+        )
+        n_da, n_da_c = danger_score_ask(
+            dep_ema=n.ask_dep_ema,
+            flicker_ema=n.ask_flicker_ema,
+            spread=n.spread,
+            micro_bias=n.micro_bias,
+        )
+
+
         logger.log(
             {
                 "ts_local_ms": ts,
@@ -238,6 +269,60 @@ async def metrics_1hz_task(state: AppState, logger: AsyncJsonlLogger) -> None:
                 # Optional: include slug/id if you added it to state.book
                 "market_slug": getattr(state.book, "market_slug", ""),
                 "market_id": getattr(state.book, "market_id", 0),
+
+                "maker": {
+                    "yes": {
+                        "micro_bias": state.book.metrics.yes.micro_bias,
+                        "spread": state.book.metrics.yes.spread,
+                        "bid_dep_ema": state.book.metrics.yes.bid_dep_ema,
+                        "ask_dep_ema": state.book.metrics.yes.ask_dep_ema,
+                        "bid_flicker_ema": state.book.metrics.yes.bid_flicker_ema,
+                        "ask_flicker_ema": state.book.metrics.yes.ask_flicker_ema,
+                        "bid_age_ms": max(0.0,
+                                          ts - state.book.metrics.yes.bid_last_change_ms) if state.book.metrics.yes.bid_last_change_ms > 0 else 0.0,
+                        "ask_age_ms": max(0.0,
+                                          ts - state.book.metrics.yes.ask_last_change_ms) if state.book.metrics.yes.ask_last_change_ms > 0 else 0.0,
+                        "danger_bid": state.book.metrics.yes.danger_bid,
+                        "danger_ask": state.book.metrics.yes.danger_ask,
+                        "danger_bid_components": y_db_c,
+                        "danger_ask_components": y_da_c,
+
+                    },
+                    "no": {
+                        "micro_bias": state.book.metrics.no.micro_bias,
+                        "spread": state.book.metrics.no.spread,
+                        "bid_dep_ema": state.book.metrics.no.bid_dep_ema,
+                        "ask_dep_ema": state.book.metrics.no.ask_dep_ema,
+                        "bid_flicker_ema": state.book.metrics.no.bid_flicker_ema,
+                        "ask_flicker_ema": state.book.metrics.no.ask_flicker_ema,
+                        "bid_age_ms": max(0.0,
+                                          ts - state.book.metrics.no.bid_last_change_ms) if state.book.metrics.no.bid_last_change_ms > 0 else 0.0,
+                        "ask_age_ms": max(0.0,
+                                          ts - state.book.metrics.no.ask_last_change_ms) if state.book.metrics.no.ask_last_change_ms > 0 else 0.0,
+                        "danger_bid": state.book.metrics.no.danger_bid,
+                        "danger_ask": state.book.metrics.no.danger_ask,
+                        "danger_bid_components": n_db_c,
+                        "danger_ask_components": n_da_c,
+                    },
+                },
+                "canon": {
+                    "mid": state.book.canon.mid,
+                    "spread": state.book.canon.spread,
+                    "mid_vel_ema": state.book.canon.mid_vel_ema,
+                    "touch_cross_risk": state.book.canon.touch_cross_risk,
+                },
+                "align": {
+                    "pending": state.align.pending,
+                    "resp_last_ms": state.align.resp_last_ms,
+                    "resp_ema_ms": state.align.resp_ema_ms,
+                    "n_impulses": state.align.n_impulses,
+                    "n_matched": state.align.n_matched,
+                    "n_missed": state.align.n_missed,
+                    "dir": state.align.dir,
+                    "mid0": state.align.mid0,
+                    "spread0": state.align.spread0,
+                    "expires_ms": state.align.expires_ms,
+                },
             }
         )
 
