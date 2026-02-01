@@ -206,7 +206,9 @@ def render_right_top(state: AppState, height: int) -> ANSI:
 
     lines.append(f"BINANCE {d.symbol} (DRIVER)")
     lines.append(f"lag_ms: {d.lag_ms:0.0f}")
-    lines.append(f"vol(30s/1m/5m): {d.vol_30s:7.4f} / {d.vol_1m:7.4f} / {d.vol_5m:7.4f}")
+    lines.append(f"vol15m_sigma%(30/60/300): {d.vol_30s:6.2f}% / {d.vol_1m:6.2f}% / {d.vol_5m:6.2f}%")
+    lines.append(f"tte_s: {d.tte_s:6.1f}  sigma_rem%: {d.sigma_rem_pct:6.2f}%  P_yes: {d.prob_yes:0.4f}  P_yes(norm): {d.prob_yes_norm:0.4f}")
+    lines.append(f"FV yes/no: {d.fv_yes:0.4f} / {d.fv_no:0.4f}")
 
     lines.append(
         "mom pts(%): "

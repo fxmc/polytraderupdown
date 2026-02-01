@@ -23,11 +23,13 @@ from candles import (
     bucket_start_ms,
     update_series_with_trade,
 )
-from config import BINANCE_STREAM_SUFFIX, BINANCE_WS_BASE
 from raw_logger import AsyncJsonlLogger
 from state import AppState, now_ms, update_tape_on_trade
 from momentum import SecPriceBuffer, mom_pct, mom_points, update_sec_price
 from mom_zscore import MomentumZConfig, MomentumZTracker
+from config import BINANCE_STREAM_SUFFIX, BINANCE_WS_BASE, VOL_R_CLIP_BY_SYMBOL, VOL_DRIVER, VOL_BLEND_W
+from volatility import VolStack, sigma_over_seconds
+from fair_value import digital_prob_lognormal, digital_prob_normal_points
 
 
 def _stream_name(symbol: str) -> str:
@@ -75,6 +77,9 @@ async def binance_ws_task(state: AppState, logger: AsyncJsonlLogger, symbol: str
     mom_z_fast = MomentumZTracker(cfg=mom_cfg_fast)
     mom_z_slow = MomentumZTracker(cfg=mom_cfg_slow)
 
+    r_clip = float(VOL_R_CLIP_BY_SYMBOL.get(symbol, 0.006))
+    vol = VolStack(r_clip=r_clip)
+
     last_roll_15m_start: int = 0
 
     while True:
@@ -102,6 +107,9 @@ async def binance_ws_task(state: AppState, logger: AsyncJsonlLogger, symbol: str
 
                     if state.driver.strike == 0.0:
                         state.driver.strike = price
+                        ws = bucket_start_ms(trade_ms, TF_15M_MS)
+                        state.driver.win_start_ms = ws
+                        state.driver.expiry_ms = ws + TF_15M_MS
 
                     new_sec = update_sec_price(mom_buf, trade_ms, price)
 
@@ -140,6 +148,80 @@ async def binance_ws_task(state: AppState, logger: AsyncJsonlLogger, symbol: str
                         state.driver.mom_z_combo_fast = mom_z_fast.combo(z_fast)
                         state.driver.mom_z_combo_slow = mom_z_slow.combo(z_slow)
 
+                        # --- time-to-expiry (seconds) ---
+                        expiry_ms = state.driver.expiry_ms
+                        tte_s = max(0.0, (expiry_ms - trade_ms) / 1000.0) if expiry_ms > 0 else 0.0
+                        state.driver.tte_s = tte_s
+
+                        # --- volatility update (1Hz) ---
+                        v = vol.update_price_1s(price)  # v30/v60/v300/v_fast/v_slow
+
+                        # Display-only: "15m sigma%" equivalents if regime persisted
+                        sigma15_30 = sigma_over_seconds(v["v30"], 900.0)
+                        sigma15_60 = sigma_over_seconds(v["v60"], 900.0)
+                        sigma15_300 = sigma_over_seconds(v["v300"], 900.0)
+
+                        state.driver.vol_30s = 100.0 * sigma15_30
+                        state.driver.vol_1m = 100.0 * sigma15_60
+                        state.driver.vol_5m = 100.0 * sigma15_300
+
+                        # --- choose driver variance ---
+                        v60 = v["v60"]
+                        vslow = v["v_slow"]
+
+                        if VOL_DRIVER == "rv60":
+                            v_drive = v60 if v60 > 0.0 else vslow
+                        elif VOL_DRIVER == "ewma_slow":
+                            v_drive = vslow
+                        else:  # "blend"
+                            w = float(VOL_BLEND_W)
+                            # blend only once rv60 has some signal; otherwise fall back to vslow
+                            v_drive = (w * v60 + (1.0 - w) * vslow) if v60 > 0.0 else vslow
+
+                        # --- remaining-horizon sigma (log) ---
+                        sigma_rem = sigma_over_seconds(v_drive, tte_s)
+                        state.driver.sigma_rem_pct = 100.0 * sigma_rem
+
+                        # --- fair value: lognormal digital ---
+                        p_yes = digital_prob_lognormal(price, state.driver.strike, sigma_rem)
+                        state.driver.prob_yes = p_yes
+                        state.driver.fv_yes = p_yes
+                        state.driver.fv_no = 1.0 - p_yes
+
+                        # --- optional normal-in-points diagnostic ---
+                        sigma_pts_rem = price * sigma_rem
+                        p_yes_norm = digital_prob_normal_points(price, state.driver.strike, sigma_pts_rem)
+                        state.driver.prob_yes_norm = p_yes_norm
+
+                        # --- metrics logging (1Hz) ---
+                        logger.log(
+                            {
+                                "ts_local_ms": recv_ms,
+                                "source": "metrics",
+                                "type": "fv_vol_1s",
+                                "symbol": symbol,
+                                "trade_ms": trade_ms,
+                                "price": price,
+                                "strike": state.driver.strike,
+                                "tte_s": tte_s,
+                                "vol_driver": VOL_DRIVER,
+                                "r_clip": r_clip,
+                                "v30": v["v30"],
+                                "v60": v60,
+                                "v300": v["v300"],
+                                "v_fast": v["v_fast"],
+                                "v_slow": vslow,
+                                "v_drive": v_drive,
+                                "sigma_rem_pct": state.driver.sigma_rem_pct,
+                                "vol15_30_pct": state.driver.vol_30s,
+                                "vol15_60_pct": state.driver.vol_1m,
+                                "vol15_300_pct": state.driver.vol_5m,
+                                "p_yes": p_yes,
+                                "p_yes_norm": p_yes_norm,
+                            }
+                        )
+
+
                     update_series_with_trade(cs_1m, trade_ms, price)
                     update_series_with_trade(cs_5m, trade_ms, price)
                     update_series_with_trade(cs_15m, trade_ms, price)
@@ -151,6 +233,9 @@ async def binance_ws_task(state: AppState, logger: AsyncJsonlLogger, symbol: str
                     if roll_15m_start != last_roll_15m_start:
                         last_roll_15m_start = roll_15m_start
                         state.driver.strike = price
+
+                        state.driver.win_start_ms = roll_15m_start
+                        state.driver.expiry_ms = roll_15m_start + TF_15M_MS
 
                         a1 = atr2_from_last3(cs_1m.closed)
                         a5 = atr2_from_last3(cs_5m.closed)

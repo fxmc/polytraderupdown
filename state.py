@@ -67,6 +67,8 @@ class BurstState:
     pressure_bins_5s: Deque[tuple[float, float, float, float]] = field(default_factory=lambda: deque(maxlen=5))
 
 
+
+
 def reset_sec_pressure(tape: "BurstState") -> None:
     """Reset current-second pressure counters."""
     tape.sec_buy_qty = 0.0
@@ -169,6 +171,16 @@ class DriverHeaderState:
     mom_z_combo_fast: float = 0.0
     mom_z_combo_slow: float = 0.0
 
+    # --- 15m window / FV ---
+    win_start_ms: float = 0.0
+    expiry_ms: float = 0.0
+    tte_s: float = 0.0
+
+    prob_yes: float = 0.0
+    prob_yes_norm: float = 0.0
+
+    # remaining-horizon sigma (log) as percent (display)
+    sigma_rem_pct: float = 0.0
 
 
 @dataclass(slots=True)

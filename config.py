@@ -23,3 +23,23 @@ RAW_LOG_FLUSH_EVERY_S: float = 0.25
 MOM_Z_HORIZONS_S = [5, 10, 15, 30, 60]
 MOM_Z_LOOKBACK = 30
 MOM_Z_MIN_COUNT = 20
+
+# --- Volatility / fair value knobs ---
+
+# Cap 1-second log returns to reduce microstructure spikes blowing up sigma.
+# Values are abs(log-return) per second; 0.005 ~ 0.5% per second.
+VOL_R_CLIP_BY_SYMBOL = {
+    "BTCUSDT": 0.005,
+    "ETHUSDT": 0.006,
+    "SOLUSDT": 0.010,
+    "XRPUSDT": 0.012,
+}
+
+# Which variance estimate drives pricing:
+# - "rv60": rolling 60s realized variance
+# - "ewma_slow": EWMA variance (slow)
+# - "blend": w*rv60 + (1-w)*ewma_slow
+VOL_DRIVER: str = "blend"
+
+# Blend weight for rv60 when VOL_DRIVER="blend"
+VOL_BLEND_W: float = 0.70
