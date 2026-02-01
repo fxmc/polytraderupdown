@@ -34,7 +34,7 @@ import websockets
 
 from config import PM_CLOB_PING_EVERY_S, PM_CLOB_WS_URL
 from raw_logger import AsyncJsonlLogger
-from state import AppState, OrderbookLevel
+from state import AppState, OrderbookLevel, AlignState
 
 from candles import TF_15M_MS, bucket_start_ms
 from config import PM_COIN_BY_BINANCE
@@ -253,45 +253,76 @@ def _update_canon_metrics(state: AppState, recv_ms: float) -> None:
     c.touch_cross_risk = 0.0 if intensity <= 0.0 else (intensity / (1.0 + intensity))
 
 
+def _align_reset(a: AlignState) -> None:
+    a.pending = False
+    a.impulse_ms = 0.0
+    a.dir = 0
+    a.mid0 = 0.0
+    a.spread0 = 0.0
+    a.expires_ms = 0.0
+
+    a.resp_last_ms = 0.0
+    a.resp_ema_ms = 0.0
+
+    a.n_impulses = 0
+    a.n_matched = 0
+    a.n_missed = 0
+
+    a.last_resp_update_ms = 0.0
+    a.resp_ema_t_ms = 0.0
+
+
 def _maybe_match_align(state: AppState, recv_ms: float) -> None:
     a = state.align
     if not a.pending:
         return
 
+    # Expire
     if recv_ms > a.expires_ms:
         a.pending = False
         a.n_missed += 1
         return
 
-    mid = state.book.canon.mid
+    b = state.book.canon
+    mid = float(b.mid)
+
+    # If canon mid isn't valid, we cannot match (don't consume the pending impulse)
     if mid <= 0.0 or a.mid0 <= 0.0 or a.dir == 0:
         return
 
-    # threshold: at least half-spread or 1 tick
-    # thr = max(0.001, 0.5 * max(0.0, a.spread0))
-    thr = 0.005  # one mid-step for a 0.01 tick market
+    # --- threshold in probability space ---
+    # Base tick-ish threshold: 0.005 catches the first meaningful movement.
+    # Also require at least half the *armed* spread (prevents matching on noise).
+    # Clamp to avoid "pinned markets" producing huge thresholds.
+    base = 0.005
+    half_sp0 = 0.5 * max(0.0, float(a.spread0))
+    thr = max(base, half_sp0)
+    thr = min(thr, 0.02)  # safety clamp
 
-    d_mid = mid - a.mid0
+    d = mid - a.mid0
+    if a.dir * d < thr:
+        return
 
-    if a.dir * d_mid >= thr:
-        resp = recv_ms - a.impulse_ms
-        if resp < 0.0:
-            resp = 0.0
+    # Matched
+    resp = recv_ms - a.impulse_ms
+    if resp < 0.0:
+        resp = 0.0
 
-        a.resp_last_ms = resp
+    a.resp_last_ms = resp
 
-        # dt-aware EWMA for response latency (tau ~ 3s)
-        if a.resp_ema_ms <= 0.0 or a.last_resp_update_ms <= 0.0:
-            a.resp_ema_ms = resp
-        else:
-            dt_s = (recv_ms - a.last_resp_update_ms) / 1000.0
-            a.resp_ema_ms = _ewma_dt(a.resp_ema_ms, resp, dt_s=dt_s, tau_s=3.0)
+    # dt-aware EWMA (tau ~ 3s)
+    last_t = float(a.resp_ema_t_ms)
+    if a.resp_ema_ms <= 0.0 or last_t <= 0.0:
+        a.resp_ema_ms = resp
+    else:
+        dt_s = max(0.0, (recv_ms - last_t) / 1000.0)
+        a.resp_ema_ms = _ewma_dt(a.resp_ema_ms, resp, dt_s, tau_s=3.0)
 
-        a.last_resp_update_ms = recv_ms
+    a.resp_ema_t_ms = recv_ms
+    a.last_resp_update_ms = recv_ms
 
-        a.pending = False
-        a.n_matched += 1
-
+    a.pending = False
+    a.n_matched += 1
 
 
 def _to_levels_best_first(levels: Any, n: int) -> List[OrderbookLevel]:
@@ -606,6 +637,9 @@ async def polymarket_clob_autoresolve_task(
                     state.book.no_asset_id = meta.no_asset_id
                     state.book.market_start_ms = float(meta.start_ms)
                     state.book.market_end_ms = float(meta.end_ms)
+
+                    # ✅ reset align latency stats on instrument boundary
+                    _align_reset(state.align)
 
                     # Reset book levels for the new market
                     state.book.yes_bids = []

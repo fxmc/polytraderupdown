@@ -27,6 +27,17 @@ def size_imbalance(levels_bid: List[OrderbookLevel], levels_ask: List[OrderbookL
     return (b - a) / denom
 
 
+def align_mode(ema_ms: float) -> str:
+    if ema_ms < 250:
+        return "NO_REACT"
+    elif ema_ms < 500:
+        return "SELECTIVE"
+    elif ema_ms < 900:
+        return "AGGRESSIVE"
+    else:
+        return "DANGER"
+
+
 def color_signed(x: float, s: str) -> str:
     """Color a preformatted signed string based on x."""
     if x > 0:
@@ -173,9 +184,10 @@ def render_left(state: AppState, height: int) -> ANSI:
     lines.append(f"skew     : {state.diag.clock_offset_ms:4.0f}ms  ({getattr(state.diag, 'clock_offset_src', '')})")
     # --- Binance -> CLOB response (canonical, mirror-safe) ---
     a = state.align
+    mode = align_mode( a.resp_ema_ms)
     pend = "*" if a.pending else "."
     lines.append(
-        f"B→CLOB resp: last {a.resp_last_ms:4.0f}ms  ema {a.resp_ema_ms:4.0f}ms  pend {pend}  n {a.n_impulses}/{a.n_matched} miss {a.n_missed}"
+        f"B→CLOB resp: last {a.resp_last_ms:4.0f}ms  ema {a.resp_ema_ms:4.0f}ms  pend {pend}  n {a.n_impulses}/{a.n_matched} miss {a.n_missed}  Mode: {mode}"
     )
     lines.append(
         f"align dbg : canon_mid {state.book.canon.mid:0.4f}  sec_move {state.tape_driver.sec_move_px:+6.2f}  atr1m {state.driver.atr_1m:0.2f}"

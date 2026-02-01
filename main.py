@@ -32,7 +32,7 @@ from state import AppState, OrderbookLevel, push_burst_line
 from ui import build_keybindings, build_layout, ui_refresh_loop
 from candles import TF_15M_MS, bucket_start_ms
 from ingest_polymarket_rtds import polymarket_rtds_task
-from ingest_polymarket_clob import polymarket_clob_task, polymarket_clob_autoresolve_task
+from ingest_polymarket_clob import polymarket_clob_autoresolve_task
 
 
 def init_state(state: AppState) -> None:
@@ -51,47 +51,6 @@ def init_state(state: AppState) -> None:
 
     for _ in range(5):
         state.tape_resolver.lines.append("")
-
-
-async def fake_book_loop(state: AppState, hz: float) -> None:
-    """Fake book updates (left pane only), stable cadence."""
-    period = 1.0 / hz
-    t0 = time.monotonic()
-
-    while True:
-        t = time.monotonic() - t0
-        _update_fake_orderbook(state, t)
-        await asyncio.sleep(period)
-
-
-async def fake_resolver_loop(state: AppState, hz: float) -> None:
-    """Fake resolver updates (right-bottom only), stable cadence."""
-    period = 1.0 / hz
-    t0 = time.monotonic()
-
-    while True:
-        t = time.monotonic() - t0
-        _update_fake_resolver(state, t)
-        await asyncio.sleep(period)
-
-
-def _update_fake_orderbook(state: AppState, t: float) -> None:
-    """Fake book updates: wiggle best sizes, pulse, and FV."""
-    state.book.updates += 1
-    state.book.pulse = "*" if (state.book.updates % 2 == 0) else "."
-    state.book.last_change_ms = 100.0
-
-    wiggle = 30.0 * (1.0 + math.sin(t * 3.0))
-
-    if state.book.yes_bids:
-        state.book.yes_bids[0].sz = 1200.0 + wiggle
-    if state.book.yes_asks:
-        state.book.yes_asks[0].sz = 1042.0 + 0.8 * wiggle
-
-    if state.book.no_bids:
-        state.book.no_bids[0].sz = 1200.0 + 0.9 * wiggle
-    if state.book.no_asks:
-        state.book.no_asks[0].sz = 1042.0 + 0.7 * wiggle
 
 
 def _raw_log_path() -> str:
@@ -129,14 +88,11 @@ async def loop_drift_task(state: AppState) -> None:
         next_t += period
 
 
-
 async def run_app(
     *,
     symbol: str,
     strike: float | None = None,
     polym_strike: float | None = None,
-    clob_yes_asset_id: str | None = None,
-    clob_no_asset_id: str | None = None,
 ) -> None:
     """Create and run the application."""
     state = AppState()
@@ -170,30 +126,14 @@ async def run_app(
 
     asyncio.create_task(ui_refresh_loop(app, hz=UI_HZ))
 
-    # Orderbook source:
-    # - If CLOB asset ids are provided, start live CLOB ingestion and disable fake.
-    # - Else, keep the fake book so the UI remains usable.
-    if clob_yes_asset_id and clob_no_asset_id:
-        # Manual override (useful for testing)
-        asyncio.create_task(
-            polymarket_clob_task(
-                state,
-                logger,
-                yes_asset_id=clob_yes_asset_id,
-                no_asset_id=clob_no_asset_id,
-                max_levels=5,
-            )
+    asyncio.create_task(
+        polymarket_clob_autoresolve_task(
+            state,
+            logger,
+            binance_symbol=symbol,
+            max_levels=5,
         )
-    else:
-        # Default: auto-resolve the current 15m market and roll each bucket
-        asyncio.create_task(
-            polymarket_clob_autoresolve_task(
-                state,
-                logger,
-                binance_symbol=symbol,
-                max_levels=5,
-            )
-        )
+    )
 
     asyncio.create_task(polymarket_rtds_task(state, logger, binance_symbol=symbol))
     asyncio.create_task(binance_ws_task(state, logger, symbol=symbol))
@@ -348,20 +288,6 @@ def main() -> None:
         help="Optional Polymarket strike override (shown in resolver pane only).",
     )
 
-    p.add_argument(
-        "--clob-yes-asset-id",
-        type=str,
-        default=None,
-        help="Polymarket CLOB YES outcome asset_id (for orderbook subscription).",
-    )
-
-    p.add_argument(
-        "--clob-no-asset-id",
-        type=str,
-        default=None,
-        help="Polymarket CLOB NO outcome asset_id (for orderbook subscription).",
-    )
-
     args = p.parse_args()
 
     asyncio.run(
@@ -369,8 +295,6 @@ def main() -> None:
             symbol=args.symbol,
             strike=args.strike,
             polym_strike=args.polym_strike,
-            clob_yes_asset_id=args.clob_yes_asset_id,
-            clob_no_asset_id=args.clob_no_asset_id,
         )
     )
 

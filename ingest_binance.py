@@ -243,11 +243,13 @@ async def binance_ws_task(state: AppState, logger: AsyncJsonlLogger, symbol: str
 
                         # --- Binance -> CLOB alignment impulse (1Hz, bounded) ---
                         a = state.align
-                        if not a.pending:
-                            # thr_pts = max(0.00020 * price, 0.25 * float(state.driver.atr_1m))
-                            thr_pts = max(0.00025 * price, 0.25 * float(state.driver.atr_1m), 5.0)
 
-                            # IMPORTANT: use 1-second move, not last tick move
+                        can_arm = (not a.pending) and (recv_ms - a.last_impulse_ms >= 1000.0)
+
+                        if can_arm:
+                            # thr_pts = max(0.00025 * price, 0.25 * float(state.driver.atr_1m), 5.0)
+                            thr_pts = 10
+
                             sec_move = float(state.tape_driver.sec_move_px)
                             imp = abs(sec_move)
 
@@ -258,10 +260,10 @@ async def binance_ws_task(state: AppState, logger: AsyncJsonlLogger, symbol: str
                                 if mid0 > 0.0:
                                     a.pending = True
                                     a.impulse_ms = recv_ms
+                                    a.last_impulse_ms = recv_ms  # <-- add this field to AlignState
                                     a.dir = 1 if sec_move > 0.0 else -1
                                     a.mid0 = mid0
                                     a.spread0 = sp0
-                                    # a.expires_ms = recv_ms + 2000.0
                                     a.expires_ms = recv_ms + 4000.0
                                     a.n_impulses += 1
 

@@ -70,6 +70,8 @@ class CanonicalBookMetrics:
     mid_prev: float = 0.0
     mid_prev_ms: float = 0.0
     mid_vel_ema: float = 0.0
+    bid1: float = 0.0
+    ask1: float = 0.0
 
     # Touch-cross risk in [0,1]
     touch_cross_risk: float = 0.0
@@ -93,7 +95,9 @@ class AlignState:
     n_missed: int = 0
 
     last_resp_update_ms: float = 0.0
+    resp_ema_t_ms: float = 0.0
 
+    last_impulse_ms: float = 0.0
 
 @dataclass(slots=True)
 class OrderbookState:
