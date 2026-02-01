@@ -9,6 +9,7 @@ Phase 3.2:
 from __future__ import annotations
 
 import asyncio
+import argparse
 import math
 import os
 import time
@@ -28,6 +29,8 @@ from ingest_binance import binance_ws_task
 from raw_logger import AsyncJsonlLogger
 from state import AppState, OrderbookLevel, push_burst_line
 from ui import build_keybindings, build_layout, ui_refresh_loop
+from candles import TF_15M_MS, bucket_start_ms
+from ingest_polymarket_rtds import polymarket_rtds_task
 
 
 def init_state(state: AppState) -> None:
@@ -88,9 +91,6 @@ def _update_fake_orderbook(state: AppState, t: float) -> None:
     if state.book.no_asks:
         state.book.no_asks[0].sz = 1042.0 + 0.7 * wiggle
 
-    state.book.fv_yes = 0.505 + 0.001 * math.sin(t * 0.7)
-    state.book.fv_no = 1.0 - state.book.fv_yes
-
 
 def _update_fake_resolver(state: AppState, t: float) -> None:
     """Fake resolver lags driver and pushes resolver tape."""
@@ -121,10 +121,22 @@ def _raw_log_path() -> str:
     return os.path.join(RAW_LOG_DIR, f"raw_{ts}.jsonl")
 
 
-async def run_app() -> None:
+async def run_app(*, symbol: str, strike: float | None, polym_strike: float | None) -> None:
     """Create and run the application."""
     state = AppState()
     init_state(state)
+
+    # Optional strike override (useful if you start mid-market and already know the strike).
+    # We also set the current 15m window start/expiry based on local time so TTE/FV can work immediately.
+    if strike is not None:
+        state.driver.strike = float(strike)
+        now_ms = time.time() * 1000.0
+        ws = bucket_start_ms(now_ms, TF_15M_MS)
+        state.driver.win_start_ms = float(ws)
+        state.driver.expiry_ms = float(ws + TF_15M_MS)
+
+    if polym_strike is not None:
+        state.resolver.strike = float(polym_strike)
 
     log_path = _raw_log_path()
     logger = AsyncJsonlLogger.create(
@@ -142,9 +154,9 @@ async def run_app() -> None:
 
     asyncio.create_task(ui_refresh_loop(app, hz=UI_HZ))
     asyncio.create_task(fake_book_loop(state, hz=FAKE_HZ))
-    asyncio.create_task(fake_resolver_loop(state, hz=FAKE_HZ))
+    asyncio.create_task(polymarket_rtds_task(state, logger, binance_symbol=symbol))
 
-    asyncio.create_task(binance_ws_task(state, logger, symbol=BINANCE_SYMBOL_DEFAULT))
+    asyncio.create_task(binance_ws_task(state, logger, symbol=symbol))
 
     try:
         await app.run_async()
@@ -154,7 +166,28 @@ async def run_app() -> None:
 
 def main() -> None:
     """Program entrypoint."""
-    asyncio.run(run_app())
+    p = argparse.ArgumentParser(description="Polymarket terminal dashboard (Binance driver).")
+    p.add_argument(
+        "--symbol",
+        default=BINANCE_SYMBOL_DEFAULT,
+        help=f"Binance symbol to subscribe to (default: {BINANCE_SYMBOL_DEFAULT})",
+    )
+    p.add_argument(
+        "--strike",
+        type=float,
+        default=None,
+        help="Optional strike override (set if starting mid-market).",
+    )
+    p.add_argument(
+        "--polym-strike",
+        type=float,
+        default=None,
+        help="Optional Polymarket strike override (shown in resolver pane only).",
+    )
+
+    args = p.parse_args()
+
+    asyncio.run(run_app(symbol=args.symbol, strike=args.strike, polym_strike=args.polym_strike))
 
 
 if __name__ == "__main__":

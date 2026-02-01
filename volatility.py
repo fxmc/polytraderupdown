@@ -67,6 +67,11 @@ class VolStack:
     ewma_fast: EwmaVar = field(default_factory=lambda: EwmaVar(alpha=0.12))
     ewma_slow: EwmaVar = field(default_factory=lambda: EwmaVar(alpha=0.02))
 
+    # inside VolStack dataclass
+    rm_60: RollingMean = field(default_factory=lambda: RollingMean(60))
+    ewma_mu_fast: EwmaMean = field(default_factory=lambda: EwmaMean(alpha=0.12))
+    ewma_mu_slow: EwmaMean = field(default_factory=lambda: EwmaMean(alpha=0.02))
+
     def update_price_1s(self, px: float) -> Dict[str, float]:
         px = float(px)
         if self.last_px <= 0.0 or px <= 0.0:
@@ -85,12 +90,20 @@ class VolStack:
         v_fast = self.ewma_fast.update(r)
         v_slow = self.ewma_slow.update(r)
 
+        self.rm_60.update(r)
+        mu_fast = self.ewma_mu_fast.update(r)
+        mu_slow = self.ewma_mu_slow.update(r)
+        mu60 = self.rm_60.mean()
+
         return {
             "v30": self.rv_30.var_hat(),
             "v60": self.rv_60.var_hat(),
             "v300": self.rv_300.var_hat(),
             "v_fast": v_fast,
             "v_slow": v_slow,
+            "mu60": mu60,
+            "mu_fast": mu_fast,
+            "mu_slow": mu_slow,
         }
 
 
@@ -99,3 +112,42 @@ def sigma_over_seconds(var_hat: float, t_s: float) -> float:
     if var_hat <= 0.0 or t_s <= 0.0:
         return 0.0
     return math.sqrt(var_hat * float(t_s))
+
+
+# --- add to volatility.py ---
+
+@dataclass(slots=True)
+class RollingMean:
+    n: int
+    r: Deque[float] = field(init=False)
+    sum_r: float = 0.0
+
+    def __post_init__(self) -> None:
+        self.r = deque(maxlen=self.n)
+
+    def update(self, x: float) -> None:
+        x = float(x)
+        if len(self.r) == self.n:
+            self.sum_r -= float(self.r[0])
+        self.r.append(x)
+        self.sum_r += x
+
+    def mean(self) -> float:
+        n = len(self.r)
+        return (self.sum_r / float(n)) if n > 0 else 0.0
+
+
+@dataclass(slots=True)
+class EwmaMean:
+    alpha: float
+    m: float = 0.0
+    initialized: bool = False
+
+    def update(self, x: float) -> float:
+        x = float(x)
+        if not self.initialized:
+            self.m = x
+            self.initialized = True
+            return self.m
+        self.m = (1.0 - self.alpha) * self.m + self.alpha * x
+        return self.m

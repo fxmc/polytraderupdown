@@ -10,6 +10,7 @@ Connects to the Binance WS trade stream and updates:
 from __future__ import annotations
 
 import json
+import stat
 from typing import Any, Dict, Optional
 
 import websockets
@@ -29,7 +30,8 @@ from momentum import SecPriceBuffer, mom_pct, mom_points, update_sec_price
 from mom_zscore import MomentumZConfig, MomentumZTracker
 from config import BINANCE_STREAM_SUFFIX, BINANCE_WS_BASE, VOL_R_CLIP_BY_SYMBOL, VOL_DRIVER, VOL_BLEND_W
 from volatility import VolStack, sigma_over_seconds
-from fair_value import digital_prob_lognormal, digital_prob_normal_points
+from fair_value import digital_prob_normal_points, digital_prob_lognormal, digital_prob_lognormal_drift
+from config import FV_USE_DRIFT, DRIFT_DRIVER, DRIFT_BLEND_W
 
 
 def _stream_name(symbol: str) -> str:
@@ -193,6 +195,48 @@ async def binance_ws_task(state: AppState, logger: AsyncJsonlLogger, symbol: str
                         p_yes_norm = digital_prob_normal_points(price, state.driver.strike, sigma_pts_rem)
                         state.driver.prob_yes_norm = p_yes_norm
 
+                        # --- drift estimate (mu_hat per second, in log-return units) ---
+                        mu60 = v.get("mu60", 0.0)
+                        mu_slow = v.get("mu_slow", 0.0)
+
+                        if DRIFT_DRIVER == "mu60":
+                            mu_hat = mu60
+                        elif DRIFT_DRIVER == "ewma_slow":
+                            mu_hat = mu_slow
+                        else:  # "blend"
+                            w = float(DRIFT_BLEND_W)
+                            mu_hat = (w * mu60 + (1.0 - w) * mu_slow) if mu60 != 0.0 else mu_slow
+
+                        mu_T = mu_hat * tte_s  # expected log-return over remaining horizon
+
+                        if FV_USE_DRIFT:
+                            p_yes = digital_prob_lognormal_drift(price, state.driver.strike, sigma_rem, mu_T)
+                        else:
+                            p_yes = digital_prob_lognormal(price, state.driver.strike, sigma_rem)
+
+                        p_yes_nd = digital_prob_lognormal(price, state.driver.strike, sigma_rem)
+                        state.driver.p_yes_nd = p_yes_nd
+                        state.driver.fv_yes_nd = p_yes_nd
+                        state.driver.fv_no_nd = 1.0 - p_yes_nd
+
+                        state.driver.prob_yes = p_yes
+                        state.driver.fv_yes = p_yes
+                        state.driver.fv_no = 1.0 - p_yes
+
+                        # --- propagate model FV into book ---
+                        state.book.fv_yes = state.driver.fv_yes
+                        state.book.fv_no = state.driver.fv_no
+
+                        state.book.fv_yes_nd = state.driver.fv_yes_nd
+                        state.book.fv_no_nd = state.driver.fv_no_nd
+
+                        state.driver.mu_hat_per_s = mu_hat
+                        state.driver.mu_T = mu_T
+
+                        # compute no-drift baseline for diagnostics
+                        p_yes_nd = digital_prob_lognormal(price, state.driver.strike, sigma_rem)
+                        state.driver.p_yes_nd = p_yes_nd
+
                         # --- metrics logging (1Hz) ---
                         logger.log(
                             {
@@ -218,9 +262,14 @@ async def binance_ws_task(state: AppState, logger: AsyncJsonlLogger, symbol: str
                                 "vol15_300_pct": state.driver.vol_5m,
                                 "p_yes": p_yes,
                                 "p_yes_norm": p_yes_norm,
+                                "mu60": mu60,
+                                "mu_slow": mu_slow,
+                                "mu_hat": mu_hat,
+                                "mu_T": mu_T,
+                                "FV_USE_DRIFT": FV_USE_DRIFT,
+                                "DRIFT_DRIVER": DRIFT_DRIVER
                             }
                         )
-
 
                     update_series_with_trade(cs_1m, trade_ms, price)
                     update_series_with_trade(cs_5m, trade_ms, price)

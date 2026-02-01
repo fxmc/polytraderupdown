@@ -39,3 +39,19 @@ def digital_prob_normal_points(S: float, K: float, sigma_pts_T: float) -> float:
 
     z = (S - K) / sigma_pts_T
     return norm_cdf(z)
+
+
+def digital_prob_lognormal_drift(S: float, K: float, sigma_T: float, mu_T: float) -> float:
+    """
+    P(ST > K) under lognormal diffusion with physical drift in log terms.
+    sigma_T = stddev of log-price over horizon
+    mu_T    = expected log-return over horizon (mu_hat_per_sec * t_s)
+    """
+    S = float(S); K = float(K); sigma_T = float(sigma_T); mu_T = float(mu_T)
+    if S <= 0.0 or K <= 0.0:
+        return 0.0
+    if sigma_T <= 1e-12:
+        return 1.0 if (S * math.exp(mu_T)) > K else 0.0
+
+    d2 = (math.log(S / K) + mu_T - 0.5 * sigma_T * sigma_T) / sigma_T
+    return norm_cdf(d2)

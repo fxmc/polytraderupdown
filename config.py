@@ -43,3 +43,26 @@ VOL_DRIVER: str = "blend"
 
 # Blend weight for rv60 when VOL_DRIVER="blend"
 VOL_BLEND_W: float = 0.70
+
+# --- Drift (physical trend) knobs ---
+FV_USE_DRIFT: bool = True
+
+# Which drift estimate drives pricing:
+# - "mu60": rolling 60s mean of 1s log returns
+# - "ewma_slow": EWMA mean (slow)
+# - "blend": w*mu60 + (1-w)*ewma_slow
+DRIFT_DRIVER: str = "blend"
+DRIFT_BLEND_W: float = 0.70
+
+# --- Polymarket RTDS (resolver price feed) ---
+PM_RTDS_URL: str = "wss://ws-live-data.polymarket.com"
+PM_RTDS_TOPIC: str = "crypto_prices_chainlink"
+PM_PING_EVERY_S: float = 5.0  # docs suggest ping about every 5s :contentReference[oaicite:3]{index=3}
+
+# Map Binance symbols to Chainlink RTDS symbols (filters expect slash form) :contentReference[oaicite:4]{index=4}
+PM_CHAINLINK_SYMBOL_BY_BINANCE = {
+    "BTCUSDT": "btc/usd",
+    "ETHUSDT": "eth/usd",
+    "SOLUSDT": "sol/usd",
+    "XRPUSDT": "xrp/usd",
+}

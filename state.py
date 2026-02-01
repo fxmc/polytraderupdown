@@ -26,6 +26,8 @@ class OrderbookState:
     no_asks: List[OrderbookLevel] = field(default_factory=list)
     fv_yes: float = 0.0
     fv_no: float = 0.0
+    fv_yes_nd: float = 0.0
+    fv_no_nd: float = 0.0
     updates: int = 0
     last_change_ms: float = 0.0
     pulse: str = "."
@@ -182,6 +184,15 @@ class DriverHeaderState:
     # remaining-horizon sigma (log) as percent (display)
     sigma_rem_pct: float = 0.0
 
+    # --- drift (physical, 1s log-return units) ---
+    mu_hat_per_s: float = 0.0      # estimated mean 1s log-return
+    mu_T: float = 0.0              # expected log-return over remaining horizon
+    p_yes_nd: float = 0.0          # no-drift probability (for compare)
+
+    # --- no-drift baseline (diagnostic) ---
+    fv_yes_nd: float = 0.0
+    fv_no_nd: float = 0.0
+
 
 @dataclass(slots=True)
 class ResolverHeaderState:
@@ -198,6 +209,7 @@ class ResolverHeaderState:
     mid: float = 0.0
     last_trade: float = 0.0
     updates: int = 0
+    strike: float = 0.0
 
 
 @dataclass(slots=True)

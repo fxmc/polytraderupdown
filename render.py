@@ -11,6 +11,27 @@ from prompt_toolkit.formatted_text import ANSI
 from state import AppState, OrderbookLevel, pressure_imbalance_notional_5s_live
 
 
+# --- ANSI color helpers ---
+RESET = "\x1b[0m"
+FG_GREEN = "\x1b[32m"
+FG_RED = "\x1b[31m"
+FG_DIM = "\x1b[2m"
+
+
+def color_signed(x: float, s: str) -> str:
+    """Color a preformatted signed string based on x."""
+    if x > 0:
+        return f"{FG_GREEN}{s}{RESET}"
+    if x < 0:
+        return f"{FG_RED}{s}{RESET}"
+    return s
+
+
+def color_signed_fmt(x: float, fmt: str) -> str:
+    """Format + color a number in one go."""
+    return color_signed(x, format(x, fmt))
+
+
 def fv_indicator_ansi(fv: float, mid: float) -> str:
     """Return a + or - indicator with colored background based on FV vs mid."""
     if fv > mid:
@@ -158,9 +179,21 @@ def render_left(state: AppState, height: int) -> ANSI:
 
     lines.append(format_split_line("", "", left_width))
 
-    fv_left = f"FV       {state.book.fv_yes:0.4f}"
-    fv_right = f"{state.book.fv_no:0.4f}"
-    lines.append(format_split_line(fv_left, f"{'':9}{fv_right}", left_width))
+    # --- Fair values ---
+    # Book FV (what CLOB currently believes / derived from mid or your book logic)
+    book_fv_left = f"BOOK FV  {state.book.fv_yes:0.4f}"
+    book_fv_right = f"{state.book.fv_no:0.4f}"
+    lines.append(format_split_line(book_fv_left, f"{'':9}{book_fv_right}", left_width))
+
+    # Model FV (your Binance-driven pricing model; drift-aware)
+    model_fv_left = f"MODEL FV {state.driver.fv_yes:0.4f}"
+    model_fv_right = f"{state.driver.fv_no:0.4f}"
+    lines.append(format_split_line(model_fv_left, f"{'':9}{model_fv_right}", left_width))
+
+    # Model FV (no-drift baseline)
+    nd_fv_left = f"MODEL ND {state.driver.fv_yes_nd:0.4f}"
+    nd_fv_right = f"{state.driver.fv_no_nd:0.4f}"
+    lines.append(format_split_line(nd_fv_left, f"{'':9}{nd_fv_right}", left_width))
 
     lines.append(format_split_line("", "", left_width))
 
@@ -189,8 +222,19 @@ def render_left(state: AppState, height: int) -> ANSI:
     yes_badge = fv_indicator_ansi(state.book.fv_yes, yes_mid)
     no_badge = fv_indicator_ansi(state.book.fv_no, no_mid)
 
+    yes_badge_nd = fv_indicator_ansi(state.book.fv_yes_nd, yes_mid)
+    no_badge_nd = fv_indicator_ansi(state.book.fv_no_nd, no_mid)
+
+    lines.append("")
+    lines.append("With Drift")
+    lines.append("==========")
     lines.append(f"YES spread: {yes_spread:0.4f} mid: {yes_mid:0.4f}  FV: {state.book.fv_yes:0.4f}  {yes_badge}")
     lines.append(f"NO  spread: {no_spread:0.4f} mid: {no_mid:0.4f}  FV: {state.book.fv_no:0.4f}  {no_badge}")
+    lines.append("")
+    lines.append("Without Drift")
+    lines.append("=============")
+    lines.append(f"YES spread: {yes_spread:0.4f} mid: {yes_mid:0.4f}  FV: {state.book.fv_yes_nd:0.4f}  {yes_badge_nd}")
+    lines.append(f"NO  spread: {no_spread:0.4f} mid: {no_mid:0.4f}  FV: {state.book.fv_no_nd:0.4f}  {no_badge_nd}")
 
     lines.append(f"pulse     : {state.book.pulse}")
     lines.append(f"last_ Δ_ms: {state.book.last_change_ms:0.0f}")
@@ -204,41 +248,31 @@ def render_right_top(state: AppState, height: int) -> ANSI:
     dist = d.last - d.strike
     lines: List[str] = []
 
-    lines.append(f"BINANCE {d.symbol} (DRIVER)")
-    lines.append(f"lag_ms: {d.lag_ms:0.0f}")
+    lines.append(f"BINANCE {d.symbol} (DRIVER) -- tte_s: {d.tte_s:6.1f}  ")
+    lines.append(f"lag_ms                  : {d.lag_ms:0.0f}")
     lines.append(f"vol15m_sigma%(30/60/300): {d.vol_30s:6.2f}% / {d.vol_1m:6.2f}% / {d.vol_5m:6.2f}%")
-    lines.append(f"tte_s: {d.tte_s:6.1f}  sigma_rem%: {d.sigma_rem_pct:6.2f}%  P_yes: {d.prob_yes:0.4f}  P_yes(norm): {d.prob_yes_norm:0.4f}")
-    lines.append(f"FV yes/no: {d.fv_yes:0.4f} / {d.fv_no:0.4f}")
+    lines.append(f"sigma_rem%              : {d.sigma_rem_pct:6.2f}%")
 
-    lines.append(
-        "mom pts(%): "
-        f"5s {d.mom_5s:+7.2f}({d.mom_5s_pct:+0.3f}%)  "
-        f"10s {d.mom_10s:+7.2f}({d.mom_10s_pct:+0.3f}%)  "
-        f"15s {d.mom_15s:+7.2f}({d.mom_15s_pct:+0.3f}%)"
-    )
-    lines.append(
-        "           "
-        f"30s {d.mom_30s:+7.2f}({d.mom_30s_pct:+0.3f}%)  "
-        f" 1m {d.mom_1m:+7.2f}({d.mom_1m_pct:+0.3f}%)  "
-        f" 5m {d.mom_5m:+7.2f}({d.mom_5m_pct:+0.3f}%)"
-    )
-    lines.append(
-        f"mom z          : fast {d.mom_z_combo_fast:+0.2f}  slow {d.mom_z_combo_slow:+0.2f}"
-    )
-    lines.append(
-        f"z 5/10/15/30/1m: {d.mom_z_5s:+0.2f} {d.mom_z_10s:+0.2f} {d.mom_z_15s:+0.2f} {d.mom_z_30s:+0.2f} {d.mom_z_1m:+0.2f}"
-    )
+    lines.append(f"P_yes                   : {d.prob_yes:0.4f}  (no-drift {d.p_yes_nd:0.4f})  Δ {d.prob_yes - d.p_yes_nd:+0.4f}")
+    lines.append(f"drift mu_hat/s          : {d.mu_hat_per_s:+0.6e}   mu_T(rem) {d.mu_T:+0.6e}")
+    sigma_T = d.sigma_rem_pct / 100.0
+    ratio = (d.mu_T / sigma_T) if sigma_T > 1e-12 else 0.0
+    lines.append(f"drift/sigma ratio       : {ratio:+0.2f}  (mu_T/sigma_T)")
+
+    lines.append(f"mom pts(%)              : 5s {d.mom_5s:+7.2f}({d.mom_5s_pct:+0.3f}%)  10s {d.mom_10s:+7.2f}({d.mom_10s_pct:+0.3f}%)  15s {d.mom_15s:+7.2f}({d.mom_15s_pct:+0.3f}%)")
+    lines.append(f"                         30s {d.mom_30s:+7.2f}({d.mom_30s_pct:+0.3f}%)   1m {d.mom_1m:+7.2f}({d.mom_1m_pct:+0.3f}%)   5m {d.mom_5m:+7.2f}({d.mom_5m_pct:+0.3f}%)")
+    lines.append(f"z 5/10/15/30/1m         : {d.mom_z_5s:+0.2f} {d.mom_z_10s:+0.2f} {d.mom_z_15s:+0.2f} {d.mom_z_30s:+0.2f} {d.mom_z_1m:+0.2f}")
+
     p5 = pressure_imbalance_notional_5s_live(state.tape_driver)
     b = state.tape_driver.buy_notional_5s + state.tape_driver.sec_buy_notional
     s = state.tape_driver.sell_notional_5s + state.tape_driver.sec_sell_notional
 
-    lines.append(
-        f"pressure(5s)   : {p5:+0.2f}  B {b:,.0f}  S {s:,.0f}"
-    )
+    # --- colored values ---
+    p5_col = color_signed(p5, f"{p5:+0.2f}")
+    fast_col = color_signed(d.mom_z_combo_fast, f"{d.mom_z_combo_fast:+0.2f}")
+    slow_col = color_signed(d.mom_z_combo_slow, f"{d.mom_z_combo_slow:+0.2f}")
+    dist_col = color_signed(dist, f"{dist:+10.2f}")
 
-    lines.append(f"ATR2 bands  1m : ±{d.atr_1m:10.2f}")
-    lines.append(f"ATR2 bands  5m : ±{d.atr_5m:10.2f}")
-    lines.append(f"ATR2 bands 15m : ±{d.atr_15m:10.2f}")
     lines.append("-" * 72)
     lines.append("BURST TAPE (newest first)")
 
@@ -246,10 +280,18 @@ def render_right_top(state: AppState, height: int) -> ANSI:
         lines.append(line)
 
     lines.append("")
-    lines.append(f"strike: {d.strike:10.2f}")
-    lines.append(f"last  : {d.last:10.2f}")
-    lines.append(f"dist  : {dist:+10.2f}")
-    lines.append(f"d_last: {d.d_last:+10.2f}")
+    lines.append(f"ATR2 bands  1m          : ±{d.atr_1m:5.2f}, 5m: ±{d.atr_5m:5.2f}, 15m: ±{d.atr_15m:5.2f}")
+    lines.append(f"strike                  : {d.strike:10.2f}")
+    lines.append(f"last                    : {d.last:10.2f}")
+    lines.append(f"dist                    : {dist_col}")
+    lines.append("")
+    lines.append(f"pressure(5s)            : {p5_col}                B {b:,.0f}  S {s:,.0f}")
+    lines.append(f"mom z fast              : {fast_col}")
+    lines.append(f"mom z slow              : {slow_col}")
+    lines.append(f"FV yes/no               : {d.fv_yes:0.4f} / {d.fv_no:0.4f}")
+    lines.append(f"FV no-drift yes/no      : {d.fv_yes_nd:0.4f} / {d.fv_no_nd:0.4f}")
+    lines.append(f"FV Δ(yes)               : {d.fv_yes - d.fv_yes_nd:+0.4f}")
+    # lines.append(f"d_last: {d.d_last:+10.2f}")
 
     return fit_to_height(lines, height)
 
@@ -257,7 +299,7 @@ def render_right_top(state: AppState, height: int) -> ANSI:
 def render_right_bottom(state: AppState, height: int) -> ANSI:
     """Render RIGHT-BOTTOM pane (Polymarket resolver)."""
     r = state.resolver
-    strike = state.driver.strike
+    strike = r.strike
     dist = r.last - strike
 
     lines: List[str] = []
