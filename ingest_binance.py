@@ -10,7 +10,7 @@ Connects to the Binance WS trade stream and updates:
 from __future__ import annotations
 
 import json
-import stat
+import time
 from typing import Any, Dict, Optional
 
 import websockets
@@ -88,6 +88,8 @@ async def binance_ws_task(state: AppState, logger: AsyncJsonlLogger, symbol: str
         try:
             async with websockets.connect(url, ping_interval=20, ping_timeout=20) as ws:
                 async for raw in ws:
+                    t0 = time.perf_counter()
+
                     recv_ms = now_ms()
                     msg = json.loads(raw)
 
@@ -100,11 +102,13 @@ async def binance_ws_task(state: AppState, logger: AsyncJsonlLogger, symbol: str
                     is_buyer_maker = bool(parsed["is_buyer_maker"])
                     trade_ts_ms = float(parsed["trade_ts_ms"])
                     trade_ms = trade_ts_ms if trade_ts_ms > 0.0 else now_ms()
-                    lag_ms = max(0.0, recv_ms - trade_ts_ms) if trade_ts_ms > 0 else 0.0
+                    lag_raw_ms = max(0.0, recv_ms - trade_ts_ms) if trade_ts_ms > 0 else 0.0
+                    lag_ms = max(0.0, lag_raw_ms - state.diag.clock_offset_ms)
 
                     prev = state.driver.last
                     state.driver.last = price
                     state.driver.d_last = price - prev if prev != 0.0 else 0.0
+                    state.driver.lag_raw_ms = lag_raw_ms
                     state.driver.lag_ms = lag_ms
 
                     if state.driver.strike == 0.0:
@@ -302,6 +306,7 @@ async def binance_ws_task(state: AppState, logger: AsyncJsonlLogger, symbol: str
                         trade_ms,
                         state.driver.last,
                         state.driver.d_last,
+                        lag_raw_ms,
                         lag_ms,
                         qty,
                         is_buyer_maker,
@@ -313,10 +318,13 @@ async def binance_ws_task(state: AppState, logger: AsyncJsonlLogger, symbol: str
                             "source": "binance",
                             "type": "trade",
                             "symbol": symbol,
+                            "lag_raw_ms": lag_raw_ms,
                             "lag_ms": lag_ms,
                             "payload": msg,
                         }
                     )
+
+                    state.diag.binance_apply_ms = (time.perf_counter() - t0) * 1000.0
 
         except Exception as e:
             try:

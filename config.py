@@ -7,8 +7,7 @@ from __future__ import annotations
 
 LEFT_W: int = 75
 
-UI_HZ: float = 10.0
-FAKE_HZ: float = 10.0
+UI_HZ: float = 20.0
 
 BINANCE_WS_BASE: str = "wss://stream.binance.com:9443/ws"
 
@@ -65,4 +64,24 @@ PM_CHAINLINK_SYMBOL_BY_BINANCE = {
     "ETHUSDT": "eth/usd",
     "SOLUSDT": "sol/usd",
     "XRPUSDT": "xrp/usd",
+}
+
+
+# --- Polymarket CLOB (orderbook) ---
+# WS endpoint for market subscriptions (orderbook snapshots / trade prints)
+PM_CLOB_WS_URL: str = "wss://ws-subscriptions-clob.polymarket.com/ws/market"
+
+# The CLOB WS expects an application-level PING message.
+PM_CLOB_PING_EVERY_S: float = 10.0
+
+
+# --- Polymarket Gamma API (market resolution) ---
+PM_GET_MARKET_FROM_SLUG_URL: str = "https://gamma-api.polymarket.com/markets/slug"
+
+# Map Binance symbols to Polymarket coin strings used in slugs
+PM_COIN_BY_BINANCE = {
+    "BTCUSDT": "btc",
+    "ETHUSDT": "eth",
+    "SOLUSDT": "sol",
+    "XRPUSDT": "xrp",
 }

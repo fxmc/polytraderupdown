@@ -31,6 +31,18 @@ class OrderbookState:
     updates: int = 0
     last_change_ms: float = 0.0
     pulse: str = "."
+    # --- CLOB market metadata (NEW) ---
+    market_slug: str = ""
+    question: str = ""
+    market_id: int = 0
+    yes_asset_id: str = ""
+    no_asset_id: str = ""
+    market_start_ms: float = 0.0
+    market_end_ms: float = 0.0
+
+    # --- lag diagnostics (NEW) ---
+    lag_ms: float = 0.0   # last book message lag (ingest_ms - event_ms)
+    lag_raw_ms: float = 0.0
 
 
 @dataclass(slots=True)
@@ -39,6 +51,7 @@ class BurstState:
     lines: Deque[str]
     n_updates: int = 0
     lag_ms: float = 0.0
+    lag_raw_ms: float = 0.0
 
     last_px: float = 0.0
     last_trade_ms: float = 0.0
@@ -67,8 +80,6 @@ class BurstState:
     sell_notional_5s: float = 0.0
 
     pressure_bins_5s: Deque[tuple[float, float, float, float]] = field(default_factory=lambda: deque(maxlen=5))
-
-
 
 
 def reset_sec_pressure(tape: "BurstState") -> None:
@@ -142,6 +153,7 @@ class DriverHeaderState:
     last: float = 0.0
     d_last: float = 0.0
     lag_ms: float = 0.0
+    lag_raw_ms: float = 0.0
     vol_30s: float = 0.0
     vol_1m: float = 0.0
     vol_5m: float = 0.0
@@ -200,6 +212,7 @@ class ResolverHeaderState:
     last: float = 0.0
     d_last: float = 0.0
     lag_ms: float = 0.0
+    lag_raw_ms: float = 0.0
     vol_30s: float = 0.0
     vol_1m: float = 0.0
     vol_5m: float = 0.0
@@ -213,6 +226,20 @@ class ResolverHeaderState:
 
 
 @dataclass(slots=True)
+class DiagState:
+    # event-loop scheduling delay
+    loop_drift_ms: float = 0.0
+    loop_drift_worst_ms: float = 0.0
+
+    # parse/apply timing (latest)
+    binance_apply_ms: float = 0.0
+    clob_apply_ms: float = 0.0
+    rtds_apply_ms: float = 0.0
+    clock_offset_ms: float = 0.0
+    clock_offset_src: str = ""
+
+
+@dataclass(slots=True)
 class AppState:
     """Top-level app state read by renderer and written by reducers."""
     debug_left: bool = False
@@ -221,6 +248,7 @@ class AppState:
     resolver: ResolverHeaderState = field(default_factory=ResolverHeaderState)
     tape_driver: BurstState = field(default_factory=make_driver_tape)
     tape_resolver: BurstState = field(default_factory=make_resolver_tape)
+    diag: DiagState = field(default_factory=DiagState)
 
 
 def now_ms() -> float:
@@ -228,12 +256,13 @@ def now_ms() -> float:
     return time.time() * 1000.0
 
 
-def push_burst_line(tape: BurstState, last: float, d_last: float, lag_ms: float) -> None:
+def push_burst_line(tape: BurstState, last: float, d_last: float, lag_raw_ms: float, lag_ms: float) -> None:
     """Push one newest-first burst tape line into the given tape."""
     t = time.strftime("%H:%M:%S")
     tape.n_updates += 1
     tape.lag_ms = lag_ms
-    line = f"{t}  {last:0.2f}  Δ {d_last:+0.2f}  n {tape.n_updates:4d}  lag {lag_ms:0.0f}ms"
+    tape.lag_raw_ms = lag_raw_ms
+    line = f"{t}  {last:0.2f}  Δ {d_last:+0.2f}  n {tape.n_updates:4d}  lag {lag_ms:0.0f}ms  lag_raw {lag_raw_ms:0.0f}ms"
     tape.lines.appendleft(line)
 
 
@@ -410,6 +439,7 @@ def pressure_imbalance_notional_5s_live(tape: "BurstState") -> float:
 def format_tape_line(
     price: float,
     d_last: float,
+    lag_raw_ms: float,
     lag_ms: float,
     run_count: int,
     run_qty: float,
@@ -417,7 +447,6 @@ def format_tape_line(
     burst_level: int,
     is_buyer_maker: bool,
     sec_move_px: float,
-    p5: float
 ) -> str:
     """Format one tape line with run counters and burst indicator."""
     t = time.strftime("%H:%M:%S")
@@ -428,7 +457,7 @@ def format_tape_line(
     s = (
         f"{t}  {price:0.2f}  Δ {d_last:+0.2f}  "
         f"x{run_count:3d}  v {run_qty:7.3f}  r {rps:4.0f}/s  "
-        f"Δ1s {sec_move_px:+6.2f}  {badge}  {side}  lag {lag_ms:0.0f}ms"
+        f"Δ1s {sec_move_px:+6.2f}  {badge}  {side}  lag {lag_ms:0.0f}ms   raw_lag {lag_raw_ms:0.0f}ms"
     )
     return apply_line_highlight(s, sec_move_px, burst_level)
 
@@ -455,6 +484,7 @@ def update_tape_on_trade(
     trade_ms: float,
     price: float,
     d_last: float,
+    lag_raw_ms: float,
     lag_ms: float,
     qty: float,
     is_buyer_maker: bool,
@@ -467,6 +497,7 @@ def update_tape_on_trade(
     - Maintain EWMA trades/sec and a short burst hold timer for highlighting.
     """
     tape.n_updates += 1
+    tape.lag_raw_ms = lag_raw_ms
     tape.lag_ms = lag_ms
 
     dt_ms = trade_ms - tape.last_trade_ms if tape.last_trade_ms > 0.0 else 0.0
@@ -502,6 +533,7 @@ def update_tape_on_trade(
             format_tape_line(
                 price,
                 d_last,
+                lag_raw_ms,
                 lag_ms,
                 tape.run_count,
                 tape.run_qty,
@@ -509,7 +541,6 @@ def update_tape_on_trade(
                 tape.burst_level,
                 is_buyer_maker,
                 tape.sec_move_px,
-                p5
             )
         )
         return
@@ -519,6 +550,7 @@ def update_tape_on_trade(
     tape.lines[0] = format_tape_line(
         price,
         d_last,
+        lag_raw_ms,
         lag_ms,
         tape.run_count,
         tape.run_qty,
@@ -526,5 +558,6 @@ def update_tape_on_trade(
         tape.burst_level,
         is_buyer_maker,
         tape.sec_move_px,
-        p5
     )
+
+

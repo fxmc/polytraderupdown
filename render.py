@@ -18,6 +18,16 @@ FG_RED = "\x1b[31m"
 FG_DIM = "\x1b[2m"
 
 
+def size_imbalance(levels_bid: List[OrderbookLevel], levels_ask: List[OrderbookLevel], n: int) -> float:
+    """Return ((B-A)/(B+A)) using sizes over levels 1..n. Result in [-1,+1]."""
+    b = sum(float(x.sz) for x in levels_bid[:n])
+    a = sum(float(x.sz) for x in levels_ask[:n])
+    denom = b + a
+    if denom <= 1e-12:
+        return 0.0
+    return (b - a) / denom
+
+
 def color_signed(x: float, s: str) -> str:
     """Color a preformatted signed string based on x."""
     if x > 0:
@@ -154,6 +164,8 @@ def render_left(state: AppState, height: int) -> ANSI:
 
     lines: List[str] = []
     lines.append(f"PM CLOB (LEFT) | MODE: {mode}   (d toggle, q quit)")
+    lines.append(f"skew     : {state.diag.clock_offset_ms:4.0f}ms  ({getattr(state.diag, 'clock_offset_src', '')})")
+
     lines.append("-" * 60)
 
     lines.append(format_split_line("YES (UP)", "NO (DOWN)", left_width))
@@ -181,10 +193,6 @@ def render_left(state: AppState, height: int) -> ANSI:
 
     # --- Fair values ---
     # Book FV (what CLOB currently believes / derived from mid or your book logic)
-    book_fv_left = f"BOOK FV  {state.book.fv_yes:0.4f}"
-    book_fv_right = f"{state.book.fv_no:0.4f}"
-    lines.append(format_split_line(book_fv_left, f"{'':9}{book_fv_right}", left_width))
-
     # Model FV (your Binance-driven pricing model; drift-aware)
     model_fv_left = f"MODEL FV {state.driver.fv_yes:0.4f}"
     model_fv_right = f"{state.driver.fv_no:0.4f}"
@@ -218,7 +226,19 @@ def render_left(state: AppState, height: int) -> ANSI:
         no_spread = 0.0
         no_mid = 0.0
 
-    lines.append(f"updates   : {state.book.updates}")
+    lines.append(f"updates   : {state.book.updates}   lag : {state.book.lag_ms:0.0f}ms   raw lag: {state.book.lag_raw_ms}ms")
+    if state.book.market_slug and state.book.question:
+        lines.append(f"market    : {state.book.market_slug}")
+        lines.append(f"title     : {state.book.question}")
+
+    # --- book size imbalance metrics (online, O(1) with small N) ---
+    y_l1 = size_imbalance(state.book.yes_bids, state.book.yes_asks, 1)
+    y_l5 = size_imbalance(state.book.yes_bids, state.book.yes_asks, 5)
+    n_l1 = size_imbalance(state.book.no_bids, state.book.no_asks, 1)
+    n_l5 = size_imbalance(state.book.no_bids, state.book.no_asks, 5)
+
+    lines.append(f"imbalance : YES L1 {y_l1:+0.2f}  L5 {y_l5:+0.2f}   |   NO L1 {n_l1:+0.2f}  L5 {n_l5:+0.2f}")
+
     yes_badge = fv_indicator_ansi(state.book.fv_yes, yes_mid)
     no_badge = fv_indicator_ansi(state.book.fv_no, no_mid)
 
@@ -239,6 +259,9 @@ def render_left(state: AppState, height: int) -> ANSI:
     lines.append(f"pulse     : {state.book.pulse}")
     lines.append(f"last_ Δ_ms: {state.book.last_change_ms:0.0f}")
 
+    lines.append(f"loop drift: {state.diag.loop_drift_ms:5.1f}ms  worst {state.diag.loop_drift_worst_ms:5.1f}ms  ")
+    lines.append(f"apply ms: B {state.diag.binance_apply_ms:4.1f}  CLOB {state.diag.clob_apply_ms:4.1f}  RTDS {state.diag.rtds_apply_ms:4.1f}")
+
     return fit_to_height(lines, height)
 
 
@@ -249,6 +272,7 @@ def render_right_top(state: AppState, height: int) -> ANSI:
     lines: List[str] = []
 
     lines.append(f"BINANCE {d.symbol} (DRIVER) -- tte_s: {d.tte_s:6.1f}  ")
+    lines.append(f"lag_raw_ms              : {d.lag_raw_ms:0.0f}")
     lines.append(f"lag_ms                  : {d.lag_ms:0.0f}")
     lines.append(f"vol15m_sigma%(30/60/300): {d.vol_30s:6.2f}% / {d.vol_1m:6.2f}% / {d.vol_5m:6.2f}%")
     lines.append(f"sigma_rem%              : {d.sigma_rem_pct:6.2f}%")
@@ -280,7 +304,7 @@ def render_right_top(state: AppState, height: int) -> ANSI:
         lines.append(line)
 
     lines.append("")
-    lines.append(f"ATR2 bands  1m          : ±{d.atr_1m:5.2f}, 5m: ±{d.atr_5m:5.2f}, 15m: ±{d.atr_15m:5.2f}")
+    lines.append(f"ATR2 bands              : 1m: ±{d.atr_1m:5.2f}, 5m: ±{d.atr_5m:5.2f}, 15m: ±{d.atr_15m:5.2f}")
     lines.append(f"strike                  : {d.strike:10.2f}")
     lines.append(f"last                    : {d.last:10.2f}")
     lines.append(f"dist                    : {dist_col}")
@@ -304,6 +328,7 @@ def render_right_bottom(state: AppState, height: int) -> ANSI:
 
     lines: List[str] = []
     lines.append("POLYMARKET CRYPTO (RESOLVER / LAGGING)")
+    lines.append(f"lag_raw_ms: {r.lag_raw_ms:0.0f}")
     lines.append(f"lag_ms: {r.lag_ms:0.0f}")
     lines.append("-" * 72)
     lines.append("BURST TAPE (newest first)")
