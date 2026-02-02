@@ -60,6 +60,41 @@ def _ewma_dt(prev: float, x: float, dt_s: float, tau_s: float) -> float:
     return (1.0 - a) * prev + a * x
 
 
+def _update_depth_shape(m: L1SideMetrics, bids: List[OrderbookLevel], asks: List[OrderbookLevel]) -> None:
+    """
+    Depth shape metrics using L1..L5 only (bounded, O(1)).
+
+    We compute on each side separately:
+      - depth_ratio: (cum5 / cum1) with guard
+      - slope: (cum5 - cum1) / 4  (cum vs level linear slope proxy)
+      - convexity: (cum5 - 2*cum3 + cum1) (2nd-difference proxy)
+    """
+    def _cum(levels: List[OrderbookLevel]) -> list[float]:
+        out = []
+        s = 0.0
+        for lvl in levels[:5]:
+            s += float(lvl.sz)
+            out.append(s)
+        while len(out) < 5:
+            out.append(s)  # keep flat beyond available depth
+        return out
+
+    cb = _cum(bids)
+    ca = _cum(asks)
+
+    # bids
+    c1, c3, c5 = cb[0], cb[2], cb[4]
+    m.bid_depth_ratio = (c5 / c1) if c1 > 1e-12 else 0.0
+    m.bid_depth_slope = (c5 - c1) / 4.0
+    m.bid_depth_conv = (c5 - 2.0 * c3 + c1)
+
+    # asks
+    c1, c3, c5 = ca[0], ca[2], ca[4]
+    m.ask_depth_ratio = (c5 / c1) if c1 > 1e-12 else 0.0
+    m.ask_depth_slope = (c5 - c1) / 4.0
+    m.ask_depth_conv = (c5 - 2.0 * c3 + c1)
+
+
 def _update_l1_metrics(m: L1SideMetrics, bids, asks, recv_ms: float) -> None:
     """
     Update depletion/refill, microprice bias, quote age markers, flicker rate.
@@ -194,32 +229,48 @@ async def _app_ping_loop(ws: websockets.WebSocketClientProtocol, every_s: float)
         return
 
 
-def _canon_mid_spread(state: AppState) -> tuple[float, float]:
+def _canon_mid_spread_micro(state: AppState) -> tuple[float, float, float]:
     """
-    Canonical mid/spread in YES-probability space.
+    Canonical mid/spread/micro in YES-probability space.
 
     Mirror invariant:
       YES mid = 1 - NO mid
+      YES micro = 1 - NO micro
       spread is identical
     """
     # Prefer YES if present
     if state.book.yes_bids and state.book.yes_asks:
         bid = float(state.book.yes_bids[0].px)
         ask = float(state.book.yes_asks[0].px)
+        bid_sz = float(state.book.yes_bids[0].sz)
+        ask_sz = float(state.book.yes_asks[0].sz)
+
         sp = ask - bid
+        sp = sp if sp > 0.0 else 0.0
         mid = 0.5 * (bid + ask)
-        return mid, sp if sp > 0.0 else 0.0
+
+        denom = bid_sz + ask_sz
+        micro = (ask * bid_sz + bid * ask_sz) / denom if denom > 1e-12 else mid
+        return mid, sp, micro
 
     # Fallback to NO (mirror-map into YES space)
     if state.book.no_bids and state.book.no_asks:
         bid = float(state.book.no_bids[0].px)
         ask = float(state.book.no_asks[0].px)
-        sp = ask - bid
-        mid_no = 0.5 * (bid + ask)
-        mid_yes = 1.0 - mid_no
-        return mid_yes, sp if sp > 0.0 else 0.0
+        bid_sz = float(state.book.no_bids[0].sz)
+        ask_sz = float(state.book.no_asks[0].sz)
 
-    return 0.0, 0.0
+        sp = ask - bid
+        sp = sp if sp > 0.0 else 0.0
+        mid_no = 0.5 * (bid + ask)
+
+        denom = bid_sz + ask_sz
+        micro_no = (ask * bid_sz + bid * ask_sz) / denom if denom > 1e-12 else mid_no
+
+        # mirror into YES space
+        return (1.0 - mid_no), sp, (1.0 - micro_no)
+
+    return 0.0, 0.0, 0.0
 
 
 def _update_canon_metrics(state: AppState, recv_ms: float) -> None:
@@ -227,10 +278,12 @@ def _update_canon_metrics(state: AppState, recv_ms: float) -> None:
     Update canonical mid/spread + mid velocity EWMA + touch-cross risk.
     O(1), called on every book snapshot apply.
     """
-    mid, spread = _canon_mid_spread(state)
+    mid, spread, micro = _canon_mid_spread_micro(state)
     c = state.book.canon
     c.mid = mid
     c.spread = spread
+    c.micro = micro
+
 
     # velocity EWMA
     dt_s = 0.0
@@ -251,6 +304,44 @@ def _update_canon_metrics(state: AppState, recv_ms: float) -> None:
     sp = max(1e-9, spread)
     intensity = (c.mid_vel_ema * 1.5) / sp if mid > 0.0 else 0.0
     c.touch_cross_risk = 0.0 if intensity <= 0.0 else (intensity / (1.0 + intensity))
+
+    # ------------------------------------------------------------
+    # FV gap velocity (with drift AND no-drift)
+    # gap_yes = fv_yes - mid   (YES-probability space)
+    # ------------------------------------------------------------
+    fv_yes = float(state.book.fv_yes)
+    fv_yes_nd = float(state.book.fv_yes_nd)
+
+    gap = (fv_yes - mid) if (fv_yes > 0.0 and mid > 0.0) else 0.0
+    if c.fv_gap_prev_ms > 0.0 and recv_ms > c.fv_gap_prev_ms:
+        dt_s = (recv_ms - c.fv_gap_prev_ms) / 1000.0
+        if dt_s > 0.0:
+            vel = (gap - c.fv_gap_prev) / dt_s
+            c.fv_gap_vel_ema = _ewma_dt(c.fv_gap_vel_ema, vel, dt_s, tau_s=2.0)
+    c.fv_gap_prev = gap
+    c.fv_gap_prev_ms = recv_ms
+
+    gap_nd = (fv_yes_nd - mid) if (fv_yes_nd > 0.0 and mid > 0.0) else 0.0
+    if c.fv_gap_nd_prev_ms > 0.0 and recv_ms > c.fv_gap_nd_prev_ms:
+        dt_s = (recv_ms - c.fv_gap_nd_prev_ms) / 1000.0
+        if dt_s > 0.0:
+            vel = (gap_nd - c.fv_gap_nd_prev) / dt_s
+            c.fv_gap_nd_vel_ema = _ewma_dt(c.fv_gap_nd_vel_ema, vel, dt_s, tau_s=2.0)
+    c.fv_gap_nd_prev = gap_nd
+    c.fv_gap_nd_prev_ms = recv_ms
+
+    # ------------------------------------------------------------
+    # mid–micro gap velocity (book microstructure pressure)
+    # micro_gap = mid - micro
+    # ------------------------------------------------------------
+    micro_gap = (mid - micro) if (mid > 0.0 and micro > 0.0) else 0.0
+    if c.micro_gap_prev_ms > 0.0 and recv_ms > c.micro_gap_prev_ms:
+        dt_s = (recv_ms - c.micro_gap_prev_ms) / 1000.0
+        if dt_s > 0.0:
+            vel = (micro_gap - c.micro_gap_prev) / dt_s
+            c.micro_gap_vel_ema = _ewma_dt(c.micro_gap_vel_ema, vel, dt_s, tau_s=2.0)
+    c.micro_gap_prev = micro_gap
+    c.micro_gap_prev_ms = recv_ms
 
 
 def _align_reset(a: AlignState) -> None:
@@ -415,10 +506,13 @@ def _apply_book_snapshot(
         state.book.yes_bids = b
         state.book.yes_asks = a
         _update_l1_metrics(state.book.metrics.yes, state.book.yes_bids, state.book.yes_asks, recv_ms)
+        _update_depth_shape(state.book.metrics.yes, state.book.yes_bids, state.book.yes_asks)
+
     elif asset_id == no_asset_id:
         state.book.no_bids = b
         state.book.no_asks = a
         _update_l1_metrics(state.book.metrics.no, state.book.no_bids, state.book.no_asks, recv_ms)
+        _update_depth_shape(state.book.metrics.no, state.book.no_bids, state.book.no_asks)
     else:
         return
 

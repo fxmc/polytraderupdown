@@ -53,6 +53,15 @@ class L1SideMetrics:
     danger_bid: float = 0.0
     danger_ask: float = 0.0
 
+    # --- depth shape (L1..L5) ---
+    bid_depth_ratio: float = 0.0   # (sum L1..L5)/(L1) or cum5/cum1 proxy
+    ask_depth_ratio: float = 0.0
+    bid_depth_slope: float = 0.0   # slope of cum_size vs level (units: size/level)
+    ask_depth_slope: float = 0.0
+    bid_depth_conv: float = 0.0    # convexity proxy (2nd difference-ish)
+    ask_depth_conv: float = 0.0
+
+
 
 @dataclass(slots=True)
 class BookMetricsState:
@@ -75,6 +84,24 @@ class CanonicalBookMetrics:
 
     # Touch-cross risk in [0,1]
     touch_cross_risk: float = 0.0
+
+    # --- canonical microprice in YES-prob space ---
+    micro: float = 0.0
+
+    # --- FV gap velocity (with drift and no-drift) ---
+    fv_gap_prev: float = 0.0
+    fv_gap_prev_ms: float = 0.0
+    fv_gap_vel_ema: float = 0.0
+
+    fv_gap_nd_prev: float = 0.0
+    fv_gap_nd_prev_ms: float = 0.0
+    fv_gap_nd_vel_ema: float = 0.0
+
+    # --- mid–micro gap velocity (book microstructure pressure) ---
+    micro_gap_prev: float = 0.0
+    micro_gap_prev_ms: float = 0.0
+    micro_gap_vel_ema: float = 0.0
+
 
 
 @dataclass(slots=True)

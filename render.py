@@ -288,12 +288,26 @@ def render_left(state: AppState, height: int) -> ANSI:
     right2 = f"dep b/a {nm.bid_dep_ema:5.1f}/{nm.ask_dep_ema:5.1f}  age b/a {n_bid_age:4.0f}/{n_ask_age:4.0f}ms  flick {nm.bid_flicker_ema:4.1f}/{nm.ask_flicker_ema:4.1f}/s  D b/a {nm.danger_bid:0.2f}/{nm.danger_ask:0.2f}  X {x:0.2f}"
     # lines.append(format_split_line(left2, right2, left_width))
 
+    # --- depth shape (book slope/convexity) ---
+    left3  = (
+        f"shape b/a r {ym.bid_depth_ratio:4.1f}/{ym.ask_depth_ratio:4.1f}  "
+        f"s {ym.bid_depth_slope:5.1f}/{ym.ask_depth_slope:5.1f}  "
+        f"c {ym.bid_depth_conv:6.1f}/{ym.ask_depth_conv:6.1f}"
+    )
+    right3 = (
+        f"shape b/a r {nm.bid_depth_ratio:4.1f}/{nm.ask_depth_ratio:4.1f}  "
+        f"s {nm.bid_depth_slope:5.1f}/{nm.ask_depth_slope:5.1f}  "
+        f"c {nm.bid_depth_conv:6.1f}/{nm.ask_depth_conv:6.1f}"
+    )
+
+
     lines.append("")
     lines.append("UP")
     lines.append("=======")
     lines.append(imbalance_yes)
     lines.append(left1)
     lines.append(left2)
+    lines.append(left3)
 
     lines.append("")
     lines.append("DOWN")
@@ -301,6 +315,7 @@ def render_left(state: AppState, height: int) -> ANSI:
     lines.append(imbalance_no)
     lines.append(right1)
     lines.append(right2)
+    lines.append(right3)
 
     yes_badge = fv_indicator_ansi(state.book.fv_yes, yes_mid)
     no_badge = fv_indicator_ansi(state.book.fv_no, no_mid)
@@ -308,16 +323,47 @@ def render_left(state: AppState, height: int) -> ANSI:
     yes_badge_nd = fv_indicator_ansi(state.book.fv_yes_nd, yes_mid)
     no_badge_nd = fv_indicator_ansi(state.book.fv_no_nd, no_mid)
 
+    c = state.book.canon
+    # static gaps (YES space)
+    gap_d = (state.book.fv_yes - c.mid) if (state.book.fv_yes > 0.0 and c.mid > 0.0) else 0.0
+    gap_nd = (state.book.fv_yes_nd - c.mid) if (state.book.fv_yes_nd > 0.0 and c.mid > 0.0) else 0.0
+    micro_gap = (c.mid - c.micro) if (c.mid > 0.0 and c.micro > 0.0) else 0.0
+
+    # velocities are already EWMAs in canon
+    fv_vel_d = c.fv_gap_vel_ema
+    fv_vel_nd = c.fv_gap_nd_vel_ema
+    micro_vel = c.micro_gap_vel_ema
+
+    lines.append("")
+    lines.append(f"FV gap (D/ND)           : {gap_d:+0.4f} / {gap_nd:+0.4f}")
+    lines.append(f"FV gap vel EMA (D/ND)   : {fv_vel_d:+0.4f}/s / {fv_vel_nd:+0.4f}/s")
+    lines.append(f"mid-micro gap / vel EMA : {micro_gap:+0.4f}  {micro_vel:+0.4f}/s")
+
     lines.append("")
     lines.append("With Drift")
     lines.append("==========")
     lines.append(f"UP    mid: {yes_mid:0.4f}  FV: {state.book.fv_yes:0.4f}  {yes_badge}")
     lines.append(f"DOWN  mid: {no_mid:0.4f}  FV: {state.book.fv_no:0.4f}  {no_badge}")
+    c = state.book.canon
+
+    # drift-aware gaps/velocities in canonical YES space
+    fv_gap = (state.book.fv_yes - c.mid) if (state.book.fv_yes > 0.0 and c.mid > 0.0) else 0.0
+    micro_gap = (c.mid - c.micro) if (c.mid > 0.0 and c.micro > 0.0) else 0.0
+
+    lines.append(
+        f"FV-mid gap {fv_gap:+0.4f}  vel {c.fv_gap_vel_ema:+0.4f}/s   |   mid-micro {micro_gap:+0.4f}  vel {c.micro_gap_vel_ema:+0.4f}/s"
+    )
+
     lines.append("")
     lines.append("Without Drift")
     lines.append("=============")
     lines.append(f"UP    mid: {yes_mid:0.4f}  FV: {state.book.fv_yes_nd:0.4f}  {yes_badge_nd}")
     lines.append(f"DOWN  mid: {no_mid:0.4f}  FV: {state.book.fv_no_nd:0.4f}  {no_badge_nd}")
+    # no-drift FV gap velocity (canonical YES)
+    fv_gap_nd = (state.book.fv_yes_nd - c.mid) if (state.book.fv_yes_nd > 0.0 and c.mid > 0.0) else 0.0
+    lines.append(
+        f"FVnd-mid gap {fv_gap_nd:+0.4f}  vel {c.fv_gap_nd_vel_ema:+0.4f}/s"
+    )
 
     lines.append("")
     lines.append(f"pulse     : {state.book.pulse}")
