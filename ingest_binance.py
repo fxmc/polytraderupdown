@@ -254,18 +254,24 @@ async def binance_ws_task(state: AppState, logger: AsyncJsonlLogger, symbol: str
                             imp = abs(sec_move)
 
                             if imp >= thr_pts:
-                                mid0 = float(state.book.canon.mid)
-                                sp0 = float(state.book.canon.spread)
+                                mid0 = state.book.canon.mid
+                                sp0 = state.book.canon.spread
 
-                                if mid0 > 0.0:
+                                # only arm if we have a meaningful two-sided mid
+                                if (mid0 is not None) and (sp0 is not None) and (mid0 > 0.0):
                                     a.pending = True
                                     a.impulse_ms = recv_ms
                                     a.last_impulse_ms = recv_ms  # <-- add this field to AlignState
                                     a.dir = 1 if sec_move > 0.0 else -1
-                                    a.mid0 = mid0
-                                    a.spread0 = sp0
+                                    a.mid0 = float(mid0)
+                                    a.spread0 = float(sp0)
                                     a.expires_ms = recv_ms + 4000.0
                                     a.n_impulses += 1
+
+                        # --- FV validity (warmup guard) ---
+                        # minimal, robust definition: FV is NOT ok until we have positive vol driver and positive TTE
+                        fv_ok = (tte_s is not None) and (tte_s > 0.0) and (v_drive is not None) and (v_drive > 0.0)
+                        fv_reason = "ok" if fv_ok else ("warmup" if (v_drive is None or v_drive <= 0.0) else "bad_tte")
 
                         # --- metrics logging (1Hz) ---
                         logger.log(
@@ -297,7 +303,9 @@ async def binance_ws_task(state: AppState, logger: AsyncJsonlLogger, symbol: str
                                 "mu_hat": mu_hat,
                                 "mu_T": mu_T,
                                 "FV_USE_DRIFT": FV_USE_DRIFT,
-                                "DRIFT_DRIVER": DRIFT_DRIVER
+                                "DRIFT_DRIVER": DRIFT_DRIVER,
+                                "fv_ok": fv_ok,
+                                "fv_reason": fv_reason,
                             }
                         )
 
@@ -338,17 +346,18 @@ async def binance_ws_task(state: AppState, logger: AsyncJsonlLogger, symbol: str
                         is_buyer_maker,
                     )
 
-                    logger.log(
-                        {
-                            "ts_local_ms": recv_ms,
-                            "source": "binance",
-                            "type": "trade",
-                            "symbol": symbol,
-                            "lag_raw_ms": lag_raw_ms,
-                            "lag_ms": lag_ms,
-                            "payload": msg,
-                        }
-                    )
+                    logger.log({
+                        "ts_local_ms": recv_ms,
+                        "source": "binance",
+                        "type": "trade",
+                        "symbol": symbol,
+                        "event_ms": float(trade_ms),
+                        "price": float(price),
+                        "qty": float(qty),
+                        "is_buyer_maker": bool(is_buyer_maker),
+                        "lag_raw_ms": lag_raw_ms,
+                        "lag_ms": lag_ms,
+                    })
 
                     state.diag.binance_apply_ms = (time.perf_counter() - t0) * 1000.0
 

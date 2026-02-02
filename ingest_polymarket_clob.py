@@ -578,18 +578,6 @@ async def polymarket_clob_task(
                         if _is_ping_pong(raw):
                             continue
 
-                        # Log a few raw samples per connection (debugging / schema drift detection)
-                        if sample_left > 0:
-                            logger.log(
-                                {
-                                    "ts_local_ms": recv_ms,
-                                    "source": "polymarket_clob",
-                                    "type": "raw_sample",
-                                    "payload": raw,
-                                }
-                            )
-                            sample_left -= 1
-
                         t0 = time.perf_counter()
 
                         try:
@@ -616,16 +604,32 @@ async def polymarket_clob_task(
                             )
 
                             # Minimal semantic logging (no full depth).
-                            yb0 = state.book.yes_bids[0].px if state.book.yes_bids else 0.0
-                            ya0 = state.book.yes_asks[0].px if state.book.yes_asks else 0.0
-                            nb0 = state.book.no_bids[0].px if state.book.no_bids else 0.0
-                            na0 = state.book.no_asks[0].px if state.book.no_asks else 0.0
+                            yb0 = state.book.yes_bids[0].px if state.book.yes_bids else None
+                            ya0 = state.book.yes_asks[0].px if state.book.yes_asks else None
+                            nb0 = state.book.no_bids[0].px if state.book.no_bids else None
+                            na0 = state.book.no_asks[0].px if state.book.no_asks else None
+
+                            # boundary placeholders -> missing
+                            if ya0 is not None and ya0 >= 1.0: ya0 = None
+                            if na0 is not None and na0 >= 1.0: na0 = None
+                            if yb0 is not None and yb0 <= 0.0: yb0 = None
+                            if nb0 is not None and nb0 <= 0.0: nb0 = None
+
+                            is_two_sided = (yb0 is not None) and (ya0 is not None)
+                            is_one_sided = not is_two_sided
+                            has_book = (yb0 is not None) or (ya0 is not None) or (nb0 is not None) or (na0 is not None)
+                            is_pinned = ((yb0 is not None and yb0 >= 0.99 and ya0 is None) or
+                                         (na0 is not None and na0 <= 0.01 and nb0 is None))
+
+                            no_trade_zone = (not has_book) or (not is_two_sided) or is_pinned  # you can extend later with lag spikes etc.
 
                             logger.log(
                                 {
                                     "ts_local_ms": recv_ms,
                                     "source": "polymarket_clob",
                                     "type": "book",
+                                    "market_slug": state.book.market_slug,
+                                    "market_id": state.book.market_id,
                                     "asset_id": asset_id,
                                     "event_ms": event_ms,
                                     "lag_raw_ms": (recv_ms - event_ms) if event_ms > 0.0 else None,
@@ -635,6 +639,12 @@ async def polymarket_clob_task(
                                         "yes_ask": ya0,
                                         "no_bid": nb0,
                                         "no_ask": na0,
+                                    },
+                                    "regime": {
+                                        "is_two_sided": is_two_sided,
+                                        "is_one_sided": is_one_sided,
+                                        "is_pinned": is_pinned,
+                                        "no_trade_zone": no_trade_zone,
                                     },
                                     "updates": state.book.updates,
                                 }

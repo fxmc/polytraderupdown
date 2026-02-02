@@ -8,11 +8,54 @@ Non-blocking JSONL raw logger.
 
 from __future__ import annotations
 
+import time
 import asyncio
 import json
 import os
 from dataclasses import dataclass
 from typing import Any, Dict, Optional
+
+
+class MultiSourceJsonlLogger:
+    """
+    Routes records to per-source JSONL files.
+    Adds run_id + seq to every record.
+    """
+
+    def __init__(self, base_dir: str, run_id: str, *, max_queue: int, batch_size: int, flush_every_s: float):
+        self.base_dir = base_dir
+        self.run_id = run_id
+        self.max_queue = max_queue
+        self.batch_size = batch_size
+        self.flush_every_s = flush_every_s
+
+        self._seq = 0
+        self._loggers: dict[str, AsyncJsonlLogger] = {}
+
+    def _get(self, source: str) -> AsyncJsonlLogger:
+        if source not in self._loggers:
+            path = os.path.join(self.base_dir, self.run_id, f"{source}.jsonl")
+            lg = AsyncJsonlLogger.create(
+                path=path,
+                max_queue=self.max_queue,
+                batch_size=self.batch_size,
+                flush_every_s=self.flush_every_s,
+            )
+            lg.start()
+            self._loggers[source] = lg
+        return self._loggers[source]
+
+    def log(self, record: Dict[str, Any]) -> None:
+        source = record.get("source", "unknown")
+        self._seq += 1
+        record["run_id"] = self.run_id
+        record["seq"] = self._seq
+        self._get(source).log(record)
+
+    async def stop(self) -> None:
+        for lg in self._loggers.values():
+            await lg.stop()
+        self._loggers.clear()
 
 
 @dataclass(slots=True)

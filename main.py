@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import asyncio
 import argparse
-import math
 import os
 import time
 
@@ -33,6 +32,11 @@ from ui import build_keybindings, build_layout, ui_refresh_loop
 from candles import TF_15M_MS, bucket_start_ms
 from ingest_polymarket_rtds import polymarket_rtds_task
 from ingest_polymarket_clob import polymarket_clob_autoresolve_task
+from raw_logger import MultiSourceJsonlLogger
+
+
+def _run_id() -> str:
+    return "run_" + time.strftime("%Y%m%d_%H%M%S")
 
 
 def init_state(state: AppState) -> None:
@@ -110,15 +114,22 @@ async def run_app(
     if polym_strike is not None:
         state.resolver.strike = float(polym_strike)
 
-    log_path = _raw_log_path()
-    logger = AsyncJsonlLogger.create(
-        path=log_path,
+    run_id = _run_id()
+    logger = MultiSourceJsonlLogger(
+        base_dir=RAW_LOG_DIR,
+        run_id=run_id,
         max_queue=RAW_LOG_MAX_QUEUE,
         batch_size=RAW_LOG_BATCH_SIZE,
         flush_every_s=RAW_LOG_FLUSH_EVERY_S,
     )
-    logger.start()
-    logger.log({"ts_local_ms": time.time() * 1000.0, "source": "app", "type": "logger_start"})
+
+    logger.log({
+        "ts_local_ms": time.time() * 1000.0,
+        "source": "app",
+        "type": "run_start",
+        "binance_symbol": symbol,
+        "ui_hz": UI_HZ,
+    })
 
     layout = build_layout(state)
     kb = build_keybindings(state)
@@ -191,6 +202,27 @@ async def metrics_1hz_task(state: AppState, logger: AsyncJsonlLogger) -> None:
             micro_bias=n.micro_bias,
         )
 
+        yb = state.book.yes_bids[0].px if state.book.yes_bids else None
+        ya = state.book.yes_asks[0].px if state.book.yes_asks else None
+        nb = state.book.no_bids[0].px if state.book.no_bids else None
+        na = state.book.no_asks[0].px if state.book.no_asks else None
+
+        # boundary placeholders -> missing
+        if ya is not None and ya >= 1.0: ya = None
+        if na is not None and na >= 1.0: na = None
+        if yb is not None and yb <= 0.0: yb = None
+        if nb is not None and nb <= 0.0: nb = None
+
+        has_book = (yb is not None) or (ya is not None) or (nb is not None) or (na is not None)
+        is_two_sided = (yb is not None) and (ya is not None)
+        is_one_sided = has_book and (not is_two_sided)
+        is_pinned = ((yb is not None and yb >= 0.99 and ya is None) or
+                     (na is not None and na <= 0.01 and nb is None))
+
+        no_trade_zone = (not has_book) or is_pinned or (not is_two_sided)   # you can extend later with lag spikes etc.
+
+        canon_mid = state.book.canon.mid if is_two_sided else None
+        canon_spr = state.book.canon.spread if is_two_sided else None
 
         logger.log(
             {
@@ -200,12 +232,15 @@ async def metrics_1hz_task(state: AppState, logger: AsyncJsonlLogger) -> None:
                 "clob_book_lag_raw_ms": state.book.lag_raw_ms,
                 "clob_book_lag_ms": state.book.lag_ms,
                 "clob_updates": state.book.updates,
-                "clob_l1": {
-                    "yes_bid": state.book.yes_bids[0].px if state.book.yes_bids else 0.0,
-                    "yes_ask": state.book.yes_asks[0].px if state.book.yes_asks else 0.0,
-                    "no_bid":  state.book.no_bids[0].px  if state.book.no_bids  else 0.0,
-                    "no_ask":  state.book.no_asks[0].px  if state.book.no_asks  else 0.0,
+                "clob_l1": {"yes_bid": yb, "yes_ask": ya, "no_bid": nb, "no_ask": na},
+                "regime": {
+                    "has_book": has_book,
+                    "is_two_sided": is_two_sided,
+                    "is_one_sided": is_one_sided,
+                    "is_pinned": is_pinned,
+                    "no_trade_zone": no_trade_zone,
                 },
+
                 # Optional: include slug/id if you added it to state.book
                 "market_slug": getattr(state.book, "market_slug", ""),
                 "market_id": getattr(state.book, "market_id", 0),
@@ -246,8 +281,8 @@ async def metrics_1hz_task(state: AppState, logger: AsyncJsonlLogger) -> None:
                     },
                 },
                 "canon": {
-                    "mid": state.book.canon.mid,
-                    "spread": state.book.canon.spread,
+                    "mid": state.book.canon.mid if is_two_sided else None,
+                    "spread": state.book.canon.spread if is_two_sided else None,
                     "mid_vel_ema": state.book.canon.mid_vel_ema,
                     "touch_cross_risk": state.book.canon.touch_cross_risk,
                 },
@@ -259,9 +294,9 @@ async def metrics_1hz_task(state: AppState, logger: AsyncJsonlLogger) -> None:
                     "n_matched": state.align.n_matched,
                     "n_missed": state.align.n_missed,
                     "dir": state.align.dir,
-                    "mid0": state.align.mid0,
-                    "spread0": state.align.spread0,
-                    "expires_ms": state.align.expires_ms,
+                    "mid0": state.align.mid0 if state.align.pending else None,
+                    "spread0": state.align.spread0 if state.align.pending else None,
+                    "expires_ms": state.align.expires_ms if state.align.pending else None,
                 },
             }
         )
