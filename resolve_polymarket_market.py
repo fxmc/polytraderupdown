@@ -14,6 +14,7 @@ from config import PM_GET_MARKET_FROM_SLUG_URL
 class MarketMeta:
     slug: str
     market_id: int
+    symbol: str
     start_ms: int
     end_ms: int
     yes_asset_id: str
@@ -42,10 +43,11 @@ def _parse_market_api_response(data: Dict[str, Any]) -> MarketMeta:
     # We will treat index 0 as YES (Up) and index 1 as NO (Down).
     yes_asset_id = str(clob_token_ids[0])
     no_asset_id = str(clob_token_ids[1])
-
+    symbol = str(data["slug"])[:3]
     return MarketMeta(
         slug=str(data["slug"]),
         market_id=int(data["id"]),
+        symbol=symbol,
         start_ms=int(start_dt.timestamp() * 1000),
         end_ms=int(end_dt.timestamp() * 1000),
         yes_asset_id=yes_asset_id,

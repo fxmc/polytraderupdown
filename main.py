@@ -244,7 +244,7 @@ async def metrics_1hz_task(state: AppState, logger: AsyncJsonlLogger) -> None:
                 # Optional: include slug/id if you added it to state.book
                 "market_slug": getattr(state.book, "market_slug", ""),
                 "market_id": getattr(state.book, "market_id", 0),
-
+                "symbol": state.book.symbol,
                 "maker": {
                     "yes": {
                         "micro_bias": state.book.metrics.yes.micro_bias,

@@ -144,6 +144,7 @@ class OrderbookState:
     market_slug: str = ""
     question: str = ""
     market_id: int = 0
+    symbol: str = ""
     yes_asset_id: str = ""
     no_asset_id: str = ""
     market_start_ms: float = 0.0

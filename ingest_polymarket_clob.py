@@ -735,6 +735,7 @@ async def polymarket_clob_autoresolve_task(
 
                     # Update state with resolved metadata (UI can show it)
                     state.book.market_slug = meta.slug
+                    state.book.symbol = meta.symbol
                     state.book.question = meta.question
                     state.book.market_id = meta.market_id
                     state.book.yes_asset_id = meta.yes_asset_id
