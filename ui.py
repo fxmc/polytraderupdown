@@ -35,6 +35,24 @@ def build_keybindings(state: AppState) -> KeyBindings:
     kb = KeyBindings()
     kb.add("d")(partial(on_toggle_debug, state=state))
     kb.add("q")(on_quit)
+
+    @kb.add("p")
+    def _(event):
+        state.plot_ctl.show = True
+        state.plot_ctl.enabled = True
+        event.app.invalidate()
+
+    @kb.add("s")
+    def _(event):
+        state.plot_ctl.enabled = False
+        event.app.invalidate()
+
+    @kb.add("x")
+    def _(event):
+        state.plot_ctl.enabled = False
+        state.plot_ctl.show = False
+        event.app.invalidate()
+
     return kb
 
 

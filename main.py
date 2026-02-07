@@ -33,6 +33,8 @@ from candles import TF_15M_MS, bucket_start_ms
 from ingest_polymarket_rtds import polymarket_rtds_task
 from ingest_polymarket_clob import polymarket_clob_autoresolve_task
 from raw_logger import MultiSourceJsonlLogger
+from plot_tasks import plot_sampler_task
+from plot_live import plotter_task
 
 
 def _run_id() -> str:
@@ -151,7 +153,8 @@ async def run_app(
     asyncio.create_task(metrics_1hz_task(state, logger))
     asyncio.create_task(loop_drift_task(state))
     asyncio.create_task(cloudflare_ntp_offset_task(state, every_s=120.0))
-
+    asyncio.create_task(plot_sampler_task(state))
+    asyncio.create_task(plotter_task(state, update_hz=30.0))
     try:
         await app.run_async()
     finally:

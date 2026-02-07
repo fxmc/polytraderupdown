@@ -433,7 +433,7 @@ def render_left(state: AppState, height: int) -> ANSI:
     lines.append(f"pulse     : {state.book.pulse}")
     lines.append(f"loop drift: {state.diag.loop_drift_ms:5.1f}ms  worst {state.diag.loop_drift_worst_ms:5.1f}ms  ")
     lines.append(f"apply ms: B {state.diag.binance_apply_ms:4.1f}  CLOB {state.diag.clob_apply_ms:4.1f}  RTDS {state.diag.rtds_apply_ms:4.1f}")
-
+    lines.append(f"plot      : show={int(state.plot_ctl.show)} enabled={int(state.plot_ctl.enabled)} samples={state.plot_ctl.n_samples}")
     return fit_to_height(lines, height)
 
 

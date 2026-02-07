@@ -11,6 +11,52 @@ from typing import Deque, List
 
 
 @dataclass(slots=True)
+class PlotSeries:
+    ts_s: Deque[float] = field(default_factory=lambda: deque(maxlen=1800))  # ~15 min @ 2Hz
+    yes_mid: Deque[float] = field(default_factory=lambda: deque(maxlen=1800))
+    no_mid: Deque[float] = field(default_factory=lambda: deque(maxlen=1800))
+    yes_bid: Deque[float] = field(default_factory=lambda: deque(maxlen=1800))
+    yes_ask: Deque[float] = field(default_factory=lambda: deque(maxlen=1800))
+    no_bid: Deque[float] = field(default_factory=lambda: deque(maxlen=1800))
+    no_ask: Deque[float] = field(default_factory=lambda: deque(maxlen=1800))
+
+    # optional diagnostics / overlays
+    fv_yes: Deque[float] = field(default_factory=lambda: deque(maxlen=1800))
+    fv_no: Deque[float] = field(default_factory=lambda: deque(maxlen=1800))
+    fv_yes_nd: Deque[float] = field(default_factory=lambda: deque(maxlen=1800))
+    fv_no_nd: Deque[float] = field(default_factory=lambda: deque(maxlen=1800))
+
+
+@dataclass(slots=True)
+class PlotControlState:
+    enabled: bool = False          # plot updates running
+    show: bool = False             # whether matplotlib window should be open
+    sample_hz: float = 2.0
+    last_sample_ms: float = 0.0
+    n_samples: int = 0
+    active_win_start_ms: float = 0.0
+    active_expiry_ms: float = 0.0
+    last_plotted_n: int = 0
+
+
+def reset_plot_buffers(state: AppState) -> None:
+    ps = state.plot
+    ps.ts_s.clear()
+    ps.yes_mid.clear()
+    ps.no_mid.clear()
+    ps.yes_bid.clear()
+    ps.yes_ask.clear()
+    ps.no_bid.clear()
+    ps.no_ask.clear()
+    ps.fv_yes.clear()
+    ps.fv_no.clear()
+    ps.fv_yes_nd.clear()
+    ps.fv_no_nd.clear()
+    state.plot_ctl.n_samples = 0
+    state.plot_ctl.last_sample_ms = 0.0
+
+
+@dataclass(slots=True)
 class OrderbookLevel:
     """One orderbook level: price and size."""
     px: float
@@ -373,6 +419,8 @@ class AppState:
     tape_resolver: BurstState = field(default_factory=make_resolver_tape)
     diag: DiagState = field(default_factory=DiagState)
     align: AlignState = field(default_factory=AlignState)
+    plot: PlotSeries = field(default_factory=PlotSeries)
+    plot_ctl: PlotControlState = field(default_factory=PlotControlState)
 
 
 def now_ms() -> float:
