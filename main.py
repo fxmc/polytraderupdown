@@ -221,9 +221,6 @@ async def metrics_1hz_task(state: AppState, logger: AsyncJsonlLogger) -> None:
 
         no_trade_zone = (not has_book) or is_pinned or (not is_two_sided)   # you can extend later with lag spikes etc.
 
-        canon_mid = state.book.canon.mid if is_two_sided else None
-        canon_spr = state.book.canon.spread if is_two_sided else None
-
         logger.log(
             {
                 "ts_local_ms": ts,

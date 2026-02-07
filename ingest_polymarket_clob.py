@@ -28,25 +28,22 @@ import aiohttp
 import asyncio
 import json
 import time
-from typing import Any, Dict, Iterable, List, Optional, Tuple
-
+import random
 import websockets
+import math
 
 from config import PM_CLOB_PING_EVERY_S, PM_CLOB_WS_URL
 from raw_logger import AsyncJsonlLogger
 from state import AppState, OrderbookLevel, AlignState
-
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 from candles import TF_15M_MS, bucket_start_ms
 from config import PM_COIN_BY_BINANCE
 from resolve_polymarket_market import build_15m_slug, resolve_market_by_slug
 from maker_metrics import danger_score_bid, danger_score_ask
-
-# --- add to ingest_polymarket_clob.py ---
-
-import math
 from state import L1SideMetrics  # after you add it in state.py
 
 
+# --- add to ingest_polymarket_clob.py ---
 def _ewma_dt(prev: float, x: float, dt_s: float, tau_s: float) -> float:
     """
     dt-aware EWMA using time-constant tau_s:
@@ -434,10 +431,6 @@ def _to_levels_best_first(levels: Any, n: int) -> List[OrderbookLevel]:
     return out
 
 
-def _is_ping_pong(raw: Any) -> bool:
-    return isinstance(raw, str) and raw in ("PING", "PONG")
-
-
 def _iter_messages(raw: Any) -> Iterable[Dict[str, Any]]:
     """Normalize ws payloads into an iterable of dict messages."""
     if isinstance(raw, dict):
@@ -534,6 +527,8 @@ def _apply_book_snapshot(
         state.book.lag_ms = 0.0
         state.book.last_change_ms = 0.0
 
+    state.diag.clob_last_book_ms = recv_ms
+
 
 async def polymarket_clob_task(
     state: AppState,
@@ -553,9 +548,20 @@ async def polymarket_clob_task(
         try:
             async with websockets.connect(
                 PM_CLOB_WS_URL,
-                ping_interval=None,
-                ping_timeout=None,
+                ping_interval=20,
+                ping_timeout=20,
+                open_timeout=20,
+                close_timeout=5,
+                max_queue=512,
+                max_size=2_000_000
             ) as ws:
+                state.diag.clob_connected = False
+                state.diag.clob_connected_since_ms = _now_ms()
+                state.diag.clob_last_rx_ms = state.diag.clob_connected_since_ms
+                state.diag.clob_last_err = ""
+                state.diag.clob_last_err_ms = 0.0
+                state.diag.clob_reconnect_in_s = 0.0
+
                 await ws.send(json.dumps(build_subscribe_message(asset_ids)))
 
                 logger.log(
@@ -570,12 +576,29 @@ async def polymarket_clob_task(
 
                 ping_task = asyncio.create_task(_app_ping_loop(ws, PM_CLOB_PING_EVERY_S))
                 sample_left = 5
-
+                recv_timeout = 5.0
+                stale_kill_ms = 8_000
                 try:
-                    async for raw in ws:
-                        recv_ms = _now_ms()
+                    # async for raw in ws:
+                    while True:
+                        try:
+                            raw = await asyncio.wait_for(ws.recv(), timeout=recv_timeout)
+                        except asyncio.TimeoutError:
+                            recv_ms = _now_ms()
+                            last = float(getattr(state.diag, "clob_last_book_ms", 0.0) or getattr(state.diag, "clob_last_rx_ms", 0.0))
+                            if last > 0.0 and (recv_ms - last) > stale_kill_ms:
+                                raise RuntimeError("CLOB stale_kill: no book data")
+                            continue
 
-                        if _is_ping_pong(raw):
+                        recv_ms = _now_ms()
+                        state.diag.clob_connected = True
+                        state.diag.clob_last_rx_ms = recv_ms
+
+                        if isinstance(raw, str) and raw == "PING":
+                            await ws.send("PONG")
+                            continue
+
+                        if isinstance(raw, str) and raw == "PONG":
                             continue
 
                         t0 = time.perf_counter()
@@ -656,6 +679,7 @@ async def polymarket_clob_task(
                 finally:
                     ping_task.cancel()
                     await asyncio.gather(ping_task, return_exceptions=True)
+                    pass
 
             backoff = 1.0
 
@@ -663,6 +687,12 @@ async def polymarket_clob_task(
             raise
 
         except Exception as e:
+            now = _now_ms()
+            state.diag.clob_connected = False
+            state.diag.clob_last_err_ms = now
+            state.diag.clob_last_err = repr(e)
+            state.diag.clob_reconnect_in_s = backoff
+            # (optional) keep last_rx_ms as-is so renderer can show "last seen"
             logger.log(
                 {
                     "ts_local_ms": _now_ms(),

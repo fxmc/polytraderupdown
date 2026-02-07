@@ -7,6 +7,7 @@ import subprocess
 from dataclasses import dataclass
 from typing import Optional
 
+from state import AppState
 
 _OFFSET_RE = re.compile(r"([+-]\d+\.\d+)s")
 
@@ -55,7 +56,7 @@ def _ewma(prev: float, x: float, alpha: float) -> float:
 async def cloudflare_ntp_offset_task(
     state,
     *,
-    host: str = "time.cloudflare.com",
+    host: str = "time.cloudflare.com",  # time.cloudflare.com, time.windows.com
     samples: int = 10,
     every_s: float = 30.0,
     alpha: float = 0.15,
@@ -73,11 +74,13 @@ async def cloudflare_ntp_offset_task(
     """
     # warm start from whatever is currently in state
     prev = float(getattr(state.diag, "clock_offset_ms", 0.0))
-
+    state.diag.clock_offset_ms = 0.0
+    state.diag.clock_offset_src = "...waiting"
     while True:
         try:
             out = await asyncio.to_thread(_run_w32tm_stripchart, host, samples)
             offsets = _parse_server_minus_local_seconds(out)
+            # print('offsets:', offsets)
 
             if offsets:
                 # offsets are (server - local) in seconds.
@@ -86,7 +89,7 @@ async def cloudflare_ntp_offset_task(
                 meas_ms = (-median_s) * 1000.0
 
                 # guardrail against insane jumps (bad parse / transient)
-                if abs(meas_ms - prev) <= 5000.0:
+                if abs(meas_ms - prev) <= 15_000.0:
                     if prev == 0.0:
                         new = meas_ms  # snap first estimate
                     else:
@@ -96,8 +99,14 @@ async def cloudflare_ntp_offset_task(
                     state.diag.clock_offset_src = f"w32tm({host})"
                     prev = new
 
-        except Exception:
+        except Exception as e:
             # keep last good value; no spam logging here
+            print('Error: ', str(e))
             pass
 
         await asyncio.sleep(every_s)
+
+
+if __name__ == "__main__":
+    state = AppState()
+    asyncio.run(cloudflare_ntp_offset_task(state, host="time.cloudflare.com"))

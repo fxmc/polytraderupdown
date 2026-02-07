@@ -277,7 +277,7 @@ async def binance_ws_task(state: AppState, logger: AsyncJsonlLogger, symbol: str
                         logger.log(
                             {
                                 "ts_local_ms": recv_ms,
-                                "slug": state.book.market_slug,
+                                "market_slug": state.book.market_slug,
                                 "source": "metrics",
                                 "type": "fv_vol_1s",
                                 "symbol": symbol,

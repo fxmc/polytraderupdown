@@ -41,8 +41,8 @@ def build_keybindings(state: AppState) -> KeyBindings:
 def build_layout(state: AppState) -> Layout:
     """Build the prompt_toolkit layout with fixed left width and right top/bottom split."""
     left_control = FormattedTextControl(lambda: render_left(state, height=65))
-    top_control = FormattedTextControl(lambda: render_right_top(state, height=45))
-    bot_control = FormattedTextControl(lambda: render_right_bottom(state, height=20))
+    top_control = FormattedTextControl(lambda: render_right_top(state, height=47))
+    bot_control = FormattedTextControl(lambda: render_right_bottom(state, height=18))
 
     left_window = Window(
         content=left_control,

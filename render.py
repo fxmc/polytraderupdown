@@ -16,6 +16,24 @@ FG_GREEN = "\x1b[32m"
 FG_RED = "\x1b[31m"
 FG_DIM = "\x1b[2m"
 
+# --- ANSI color helpers ---
+RESET = "\x1b[0m"
+FG_GREEN = "\x1b[32m"
+FG_RED = "\x1b[31m"
+FG_DIM = "\x1b[2m"
+
+BG_GREEN = "\x1b[42m"
+BG_YELLOW = "\x1b[43m"
+BG_RED = "\x1b[41m"
+FG_BLACK = "\x1b[30m"
+FG_WHITE = "\x1b[97m"
+
+
+def ansi_bar(text: str, width: int, *, bg: str, fg: str) -> str:
+    """Render a solid background status bar, padded/truncated to width."""
+    s = text[:width].ljust(width)
+    return f"{bg}{fg}{s}{RESET}"
+
 
 def size_imbalance(levels_bid: List[OrderbookLevel], levels_ask: List[OrderbookLevel], n: int) -> float:
     """Return ((B-A)/(B+A)) using sizes over levels 1..n. Result in [-1,+1]."""
@@ -168,6 +186,50 @@ def fit_to_height(lines: List[str], height: int) -> ANSI:
     return ANSI("\n".join(lines))
 
 
+def render_clob_status_bar(state: AppState, width: int) -> str:
+    """
+    LEFT-pane status bar for Polymarket CLOB connectivity.
+
+    Requires these fields on state.diag:
+      - clob_connected: bool
+      - clob_last_rx_ms: float
+      - clob_reconnect_in_s: float
+      - clob_last_err: str
+    """
+    d = state.diag
+    nowv = now_ms()
+
+    # last_rx = float(getattr(d, "clob_last_rx_ms", 0.0))
+    last_rx = float(getattr(d, "clob_last_book_ms", 0.0))
+    connected = bool(getattr(d, "clob_connected", False))
+    retry_in = float(getattr(d, "clob_reconnect_in_s", 0.0))
+    last_err = str(getattr(d, "clob_last_err", "") or "")
+
+    age_ms = (nowv - last_rx) if last_rx > 0.0 else 9e9
+
+    # Tune: your recv timeout is 30s. We want the UI to scream earlier than that.
+    WARN_MS = 2_000
+    BAD_MS = 8_000
+
+    if not connected:
+        msg = f" CLOB DISCONNECTED  |  last_rx {age_ms:0.0f}ms ago  |  retry {retry_in:0.1f}s"
+        if last_err:
+            msg += f"  |  {last_err}"
+        return ansi_bar(msg, width, bg=BG_RED, fg=FG_WHITE)
+
+    # connected but stale (means: WS is up but no book messages are arriving)
+    if age_ms >= BAD_MS:
+        msg = f" CLOB STALE (connected)  |  last_rx {age_ms:0.0f}ms ago"
+        return ansi_bar(msg, width, bg=BG_RED, fg=FG_WHITE)
+
+    if age_ms >= WARN_MS:
+        msg = f" CLOB SLOW  |  last_rx {age_ms:0.0f}ms ago"
+        return ansi_bar(msg, width, bg=BG_YELLOW, fg=FG_BLACK)
+
+    msg = f" CLOB OK  |  last_rx {age_ms:0.0f}ms"
+    return ansi_bar(msg, width, bg=BG_GREEN, fg=FG_BLACK)
+
+
 def render_left(state: AppState, height: int) -> ANSI:
     """Render LEFT pane: YES/NO, each with asks (top) and bids (bottom)."""
     left_width = 36
@@ -180,6 +242,8 @@ def render_left(state: AppState, height: int) -> ANSI:
     header_prefix = " " * (tag_w + 4 + 1)
 
     lines: List[str] = []
+    # ✅ big status bar ONLY for left pane
+    lines.append(render_clob_status_bar(state, width=60))
     lines.append(f"PM CLOB (LEFT) | MODE: {mode}   (d toggle, q quit)")
     lines.append(f"skew     : {state.diag.clock_offset_ms:4.0f}ms  ({getattr(state.diag, 'clock_offset_src', '')})")
     # --- Binance -> CLOB response (canonical, mirror-safe) ---

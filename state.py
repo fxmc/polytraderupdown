@@ -62,7 +62,6 @@ class L1SideMetrics:
     ask_depth_conv: float = 0.0
 
 
-
 @dataclass(slots=True)
 class BookMetricsState:
     yes: L1SideMetrics = field(default_factory=L1SideMetrics)
@@ -103,7 +102,6 @@ class CanonicalBookMetrics:
     micro_gap_vel_ema: float = 0.0
 
 
-
 @dataclass(slots=True)
 class AlignState:
     # Binance impulse -> CLOB response latency (single canonical metric)
@@ -125,6 +123,7 @@ class AlignState:
     resp_ema_t_ms: float = 0.0
 
     last_impulse_ms: float = 0.0
+
 
 @dataclass(slots=True)
 class OrderbookState:
@@ -351,6 +350,16 @@ class DiagState:
     rtds_apply_ms: float = 0.0
     clock_offset_ms: float = 0.0
     clock_offset_src: str = ""
+
+    # --- CLOB connection health (LEFT pane) ---
+    clob_connected: bool = False
+    clob_last_rx_ms: float = 0.0
+    clob_last_book_ms: float = 0.0
+    clob_last_err: str = ""
+    clob_last_err_ms: float = 0.0
+    clob_reconnect_in_s: float = 0.0
+
+    clob_connected_since_ms: float = 0.0
 
 
 @dataclass(slots=True)
