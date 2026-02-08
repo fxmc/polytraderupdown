@@ -7,7 +7,15 @@ from __future__ import annotations
 import time
 from collections import deque
 from dataclasses import dataclass, field
-from typing import Deque, List
+from typing import Deque, List, Any
+
+BURST_ALPHA: float = 0.15
+BURST_ON_RPS: float = 280.0
+BURST_OFF_RPS: float = 200.0
+BURST_LVL2_RPS: float = 360.0
+BURST_LVL3_RPS: float = 600.0
+BURST_HOLD_MS: float = 1200.0
+BIG_MOVE_PX: float = 35.0  # you can tune
 
 
 @dataclass(slots=True)
@@ -29,31 +37,16 @@ class PlotSeries:
 
 @dataclass(slots=True)
 class PlotControlState:
-    enabled: bool = False          # plot updates running
-    show: bool = False             # whether matplotlib window should be open
+    enabled: bool = True          # plot updates running
+    show: bool = True             # whether matplotlib window should be open
     sample_hz: float = 2.0
     last_sample_ms: float = 0.0
     n_samples: int = 0
     active_win_start_ms: float = 0.0
     active_expiry_ms: float = 0.0
     last_plotted_n: int = 0
-
-
-def reset_plot_buffers(state: AppState) -> None:
-    ps = state.plot
-    ps.ts_s.clear()
-    ps.yes_mid.clear()
-    ps.no_mid.clear()
-    ps.yes_bid.clear()
-    ps.yes_ask.clear()
-    ps.no_bid.clear()
-    ps.no_ask.clear()
-    ps.fv_yes.clear()
-    ps.fv_no.clear()
-    ps.fv_yes_nd.clear()
-    ps.fv_no_nd.clear()
-    state.plot_ctl.n_samples = 0
-    state.plot_ctl.last_sample_ms = 0.0
+    # NEW: latch so we only “arm” plotting once clock offset is non-zero & stable-ish
+    clock_ready: bool = False
 
 
 @dataclass(slots=True)
@@ -63,7 +56,6 @@ class OrderbookLevel:
     sz: float
 
 
-# --- add to state.py ---
 @dataclass(slots=True)
 class L1SideMetrics:
     # last observed L1 (for delta logic)
@@ -149,29 +141,6 @@ class CanonicalBookMetrics:
 
 
 @dataclass(slots=True)
-class AlignState:
-    # Binance impulse -> CLOB response latency (single canonical metric)
-    pending: bool = False
-    impulse_ms: float = 0.0
-    dir: int = 0                 # +1 for up impulse, -1 for down
-    mid0: float = 0.0
-    spread0: float = 0.0
-    expires_ms: float = 0.0
-
-    resp_last_ms: float = 0.0
-    resp_ema_ms: float = 0.0
-
-    n_impulses: int = 0
-    n_matched: int = 0
-    n_missed: int = 0
-
-    last_resp_update_ms: float = 0.0
-    resp_ema_t_ms: float = 0.0
-
-    last_impulse_ms: float = 0.0
-
-
-@dataclass(slots=True)
 class OrderbookState:
     """Orderbook for YES and NO, each with bids and asks (L1–L5)."""
     yes_bids: List[OrderbookLevel] = field(default_factory=list)
@@ -202,6 +171,29 @@ class OrderbookState:
     metrics: BookMetricsState = field(default_factory=BookMetricsState)
 
     canon: CanonicalBookMetrics = field(default_factory=CanonicalBookMetrics)
+
+
+@dataclass(slots=True)
+class AlignState:
+    # Binance impulse -> CLOB response latency (single canonical metric)
+    pending: bool = False
+    impulse_ms: float = 0.0
+    dir: int = 0                 # +1 for up impulse, -1 for down
+    mid0: float = 0.0
+    spread0: float = 0.0
+    expires_ms: float = 0.0
+
+    resp_last_ms: float = 0.0
+    resp_ema_ms: float = 0.0
+
+    n_impulses: int = 0
+    n_matched: int = 0
+    n_missed: int = 0
+
+    last_resp_update_ms: float = 0.0
+    resp_ema_t_ms: float = 0.0
+
+    last_impulse_ms: float = 0.0
 
 
 @dataclass(slots=True)
@@ -239,69 +231,6 @@ class BurstState:
     sell_notional_5s: float = 0.0
 
     pressure_bins_5s: Deque[tuple[float, float, float, float]] = field(default_factory=lambda: deque(maxlen=5))
-
-
-def reset_sec_pressure(tape: "BurstState") -> None:
-    """Reset current-second pressure counters."""
-    tape.sec_buy_qty = 0.0
-    tape.sec_sell_qty = 0.0
-    tape.sec_buy_notional = 0.0
-    tape.sec_sell_notional = 0.0
-
-
-def roll_pressure_second(tape: "BurstState") -> None:
-    """
-    Roll the completed second's pressure into the 5-second window (O(1)).
-
-    We manage pops explicitly so we can subtract the dropped bin from rolling sums.
-    """
-    if len(tape.pressure_bins_5s) == tape.pressure_bins_5s.maxlen:
-        old = tape.pressure_bins_5s.popleft()
-        tape.buy_qty_5s -= float(old[0])
-        tape.sell_qty_5s -= float(old[1])
-        tape.buy_notional_5s -= float(old[2])
-        tape.sell_notional_5s -= float(old[3])
-
-    tape.pressure_bins_5s.append(
-        (tape.sec_buy_qty, tape.sec_sell_qty, tape.sec_buy_notional, tape.sec_sell_notional)
-    )
-    tape.buy_qty_5s += tape.sec_buy_qty
-    tape.sell_qty_5s += tape.sec_sell_qty
-    tape.buy_notional_5s += tape.sec_buy_notional
-    tape.sell_notional_5s += tape.sec_sell_notional
-
-
-def update_pressure_trade(
-    tape: "BurstState",
-    price: float,
-    qty: float,
-    is_buyer_maker: bool,
-) -> None:
-    """
-    Update current-second pressure totals for one trade.
-
-    Binance isBuyerMaker:
-    - False => buyer is taker => BUY aggressor
-    - True  => buyer is maker => SELL aggressor
-    """
-    notional = float(price) * float(qty)
-
-    if is_buyer_maker:
-        tape.sec_sell_qty += float(qty)
-        tape.sec_sell_notional += notional
-    else:
-        tape.sec_buy_qty += float(qty)
-        tape.sec_buy_notional += notional
-
-
-def make_driver_tape() -> BurstState:
-    """Create the Binance tape (20 lines)."""
-    return BurstState(lines=deque(maxlen=20))
-
-
-def make_resolver_tape() -> BurstState:
-    """Create the Polymarket tape (5 lines)."""
-    return BurstState(lines=deque(maxlen=3))
 
 
 @dataclass(slots=True)
@@ -407,6 +336,18 @@ class DiagState:
 
     clob_connected_since_ms: float = 0.0
 
+    clob_last_book_event_ms: float = 0.0  # NEW: Polymarket msg["timestamp"] in ms
+
+
+def make_driver_tape() -> BurstState:
+    """Create the Binance tape (20 lines)."""
+    return BurstState(lines=deque(maxlen=20))
+
+
+def make_resolver_tape() -> BurstState:
+    """Create the Polymarket tape (5 lines)."""
+    return BurstState(lines=deque(maxlen=3))
+
 
 @dataclass(slots=True)
 class AppState:
@@ -421,32 +362,7 @@ class AppState:
     align: AlignState = field(default_factory=AlignState)
     plot: PlotSeries = field(default_factory=PlotSeries)
     plot_ctl: PlotControlState = field(default_factory=PlotControlState)
-
-
-def now_ms() -> float:
-    """Return current epoch time in milliseconds."""
-    return time.time() * 1000.0
-
-
-def push_burst_line(tape: BurstState, last: float, d_last: float, lag_raw_ms: float, lag_ms: float) -> None:
-    """Push one newest-first burst tape line into the given tape."""
-    t = time.strftime("%H:%M:%S")
-    tape.n_updates += 1
-    tape.lag_ms = lag_ms
-    tape.lag_raw_ms = lag_raw_ms
-    line = f"{t}  {last:0.2f}  Δ {d_last:+0.2f}  n {tape.n_updates:4d}  lag {lag_ms:0.0f}ms  lag_raw {lag_raw_ms:0.0f}ms"
-    tape.lines.appendleft(line)
-
-
-BURST_ALPHA: float = 0.15
-
-BURST_ON_RPS: float = 280.0
-BURST_OFF_RPS: float = 200.0
-
-BURST_LVL2_RPS: float = 360.0
-BURST_LVL3_RPS: float = 600.0
-
-BURST_HOLD_MS: float = 1200.0
+    plot_ctl_q: Any = None
 
 
 def burst_badge(level: int) -> str:
@@ -549,9 +465,6 @@ def update_second_bucket(tape: "BurstState", trade_ms: float, price: float, qty:
     tape.rate_ewma = inst if tape.rate_ewma <= 0.0 else (1.0 - BURST_ALPHA) * tape.rate_ewma + BURST_ALPHA * inst
 
     update_pressure_trade(tape, price, qty, is_buyer_maker)
-
-
-BIG_MOVE_PX: float = 35.0  # you can tune
 
 
 def ansi_bg_green(s: str) -> str:
@@ -732,4 +645,88 @@ def update_tape_on_trade(
         tape.sec_move_px,
     )
 
+
+def reset_plot_buffers(state: AppState) -> None:
+    ps = state.plot
+    ps.ts_s.clear()
+    ps.yes_mid.clear()
+    ps.no_mid.clear()
+    ps.yes_bid.clear()
+    ps.yes_ask.clear()
+    ps.no_bid.clear()
+    ps.no_ask.clear()
+    ps.fv_yes.clear()
+    ps.fv_no.clear()
+    ps.fv_yes_nd.clear()
+    ps.fv_no_nd.clear()
+    state.plot_ctl.n_samples = 0
+    state.plot_ctl.last_sample_ms = 0.0
+
+
+def reset_sec_pressure(tape: "BurstState") -> None:
+    """Reset current-second pressure counters."""
+    tape.sec_buy_qty = 0.0
+    tape.sec_sell_qty = 0.0
+    tape.sec_buy_notional = 0.0
+    tape.sec_sell_notional = 0.0
+
+
+def roll_pressure_second(tape: "BurstState") -> None:
+    """
+    Roll the completed second's pressure into the 5-second window (O(1)).
+
+    We manage pops explicitly so we can subtract the dropped bin from rolling sums.
+    """
+    if len(tape.pressure_bins_5s) == tape.pressure_bins_5s.maxlen:
+        old = tape.pressure_bins_5s.popleft()
+        tape.buy_qty_5s -= float(old[0])
+        tape.sell_qty_5s -= float(old[1])
+        tape.buy_notional_5s -= float(old[2])
+        tape.sell_notional_5s -= float(old[3])
+
+    tape.pressure_bins_5s.append(
+        (tape.sec_buy_qty, tape.sec_sell_qty, tape.sec_buy_notional, tape.sec_sell_notional)
+    )
+    tape.buy_qty_5s += tape.sec_buy_qty
+    tape.sell_qty_5s += tape.sec_sell_qty
+    tape.buy_notional_5s += tape.sec_buy_notional
+    tape.sell_notional_5s += tape.sec_sell_notional
+
+
+def update_pressure_trade(
+    tape: "BurstState",
+    price: float,
+    qty: float,
+    is_buyer_maker: bool,
+) -> None:
+    """
+    Update current-second pressure totals for one trade.
+
+    Binance isBuyerMaker:
+    - False => buyer is taker => BUY aggressor
+    - True  => buyer is maker => SELL aggressor
+    """
+    notional = float(price) * float(qty)
+
+    if is_buyer_maker:
+        tape.sec_sell_qty += float(qty)
+        tape.sec_sell_notional += notional
+    else:
+        tape.sec_buy_qty += float(qty)
+        tape.sec_buy_notional += notional
+
+
+def now_ms() -> float:
+    """Return current epoch time in milliseconds."""
+    return time.time() * 1000.0
+
+
+def push_burst_line(tape: BurstState, last: float, d_last: float, lag_raw_ms: float, lag_ms: float) -> None:
+    """Push one newest-first burst tape line into the given tape."""
+    t = time.strftime("%H:%M:%S")
+    tape.n_updates += 1
+    tape.lag_ms = lag_ms
+    tape.lag_raw_ms = lag_raw_ms
+    line = f"{t}  {last:0.2f}  Δ {d_last:+0.2f}  n {tape.n_updates:4d}  lag {lag_ms:0.0f}ms  lag_raw {lag_raw_ms:0.0f}ms"
+    tape.lines.appendleft(line)
 

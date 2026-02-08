@@ -17,6 +17,7 @@ from prompt_toolkit.layout.dimension import Dimension
 from config import LEFT_W
 from render import render_left, render_right_bottom, render_right_top
 from state import AppState
+from plot_ipc import PlotCtl
 
 
 def on_toggle_debug(event, state: AppState) -> None:
@@ -40,17 +41,29 @@ def build_keybindings(state: AppState) -> KeyBindings:
     def _(event):
         state.plot_ctl.show = True
         state.plot_ctl.enabled = True
+        try:
+            state.plot_ctl_q.put_nowait(PlotCtl(show=True, enabled=True))
+        except Exception:
+            pass
         event.app.invalidate()
 
     @kb.add("s")
     def _(event):
         state.plot_ctl.enabled = False
+        try:
+            state.plot_ctl_q.put_nowait(PlotCtl(show=True, enabled=False))
+        except Exception:
+            pass
         event.app.invalidate()
 
     @kb.add("x")
     def _(event):
-        state.plot_ctl.enabled = False
         state.plot_ctl.show = False
+        state.plot_ctl.enabled = False
+        try:
+            state.plot_ctl_q.put_nowait(PlotCtl(show=False, enabled=False))
+        except Exception:
+            pass
         event.app.invalidate()
 
     return kb

@@ -73,9 +73,12 @@ async def cloudflare_ntp_offset_task(
     - Uses median(samples) then EWMA smoothing.
     """
     # warm start from whatever is currently in state
-    prev = float(getattr(state.diag, "clock_offset_ms", 0.0))
-    state.diag.clock_offset_ms = 0.0
-    state.diag.clock_offset_src = "...waiting"
+    prev = float(getattr(state.diag, "clock_offset_ms", 0.0) or 0.0)
+    if prev == 0.0:
+        state.diag.clock_offset_src = "...waiting"
+    else:
+        state.diag.clock_offset_src = f"w32tm({host})"  # or keep old src
+
     while True:
         try:
             out = await asyncio.to_thread(_run_w32tm_stripchart, host, samples)

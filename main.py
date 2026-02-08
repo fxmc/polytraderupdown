@@ -12,6 +12,7 @@ import asyncio
 import argparse
 import os
 import time
+import multiprocessing as mp
 
 from prompt_toolkit.application import Application
 
@@ -27,14 +28,15 @@ from config import (
 from ingest_binance import binance_ws_task
 from maker_metrics import danger_score_bid, danger_score_ask
 from raw_logger import AsyncJsonlLogger
-from state import AppState, OrderbookLevel, push_burst_line
+from state import AppState
 from ui import build_keybindings, build_layout, ui_refresh_loop
 from candles import TF_15M_MS, bucket_start_ms
 from ingest_polymarket_rtds import polymarket_rtds_task
 from ingest_polymarket_clob import polymarket_clob_autoresolve_task
 from raw_logger import MultiSourceJsonlLogger
 from plot_tasks import plot_sampler_task
-from plot_live import plotter_task
+from plot_process import plot_process_main
+from plot_ipc import PlotCtl
 
 
 def _run_id() -> str:
@@ -137,28 +139,62 @@ async def run_app(
     kb = build_keybindings(state)
     app = Application(layout=layout, key_bindings=kb, full_screen=True)
 
-    asyncio.create_task(ui_refresh_loop(app, hz=UI_HZ))
+    # create queues
+    plot_q = mp.Queue(maxsize=10)  # keep newest, drop old
+    plot_ctl_q = mp.Queue(maxsize=5)
 
-    asyncio.create_task(
-        polymarket_clob_autoresolve_task(
-            state,
-            logger,
-            binance_symbol=symbol,
-            max_levels=5,
-        )
+    # expose control queue to UI keybindings
+    state.plot_ctl_q = plot_ctl_q
+
+    plot_proc = mp.Process(
+        target=plot_process_main,
+        args=(plot_q, plot_ctl_q),
+        kwargs={"maxlen": 1800},
+        daemon=True,
     )
+    plot_proc.start()
 
+    # main.py (inside run_app), right after plot_proc.start()
+
+    # Ensure plot starts visible/enabled immediately, and seed the current window start.
+    now_ms = time.time() * 1000.0
+    ws = bucket_start_ms(now_ms, TF_15M_MS)
+
+    # Keep the state consistent too (sampler reads state.plot_ctl)
+    state.plot_ctl.show = True
+    state.plot_ctl.enabled = True
+    state.plot_ctl.active_win_start_ms = float(ws)
+    state.plot_ctl.active_expiry_ms = float(ws + TF_15M_MS)
+
+    # Tell the plot process to show + enable + reset at this window start
+    try:
+        plot_ctl_q.put_nowait(
+            PlotCtl(
+                show=True,
+                enabled=True,
+                reset=True,
+                win_start_s=float(ws) / 1000.0,
+            )
+        )
+    except Exception:
+        pass
+
+    asyncio.create_task(ui_refresh_loop(app, hz=UI_HZ))
+    asyncio.create_task(polymarket_clob_autoresolve_task(state, logger, binance_symbol=symbol, max_levels=5))
     asyncio.create_task(polymarket_rtds_task(state, logger, binance_symbol=symbol))
     asyncio.create_task(binance_ws_task(state, logger, symbol=symbol))
     asyncio.create_task(metrics_1hz_task(state, logger))
     asyncio.create_task(loop_drift_task(state))
     asyncio.create_task(cloudflare_ntp_offset_task(state, every_s=120.0))
-    asyncio.create_task(plot_sampler_task(state))
-    asyncio.create_task(plotter_task(state, update_hz=30.0))
+    asyncio.create_task(plot_sampler_task(state, plot_q))
     try:
         await app.run_async()
     finally:
         await logger.stop()
+        try:
+            plot_proc.terminate()
+        except Exception:
+            pass
 
 
 async def metrics_1hz_task(state: AppState, logger: AsyncJsonlLogger) -> None:
@@ -335,4 +371,5 @@ def main() -> None:
 
 
 if __name__ == "__main__":
+    mp.set_start_method("spawn", force=True)
     main()

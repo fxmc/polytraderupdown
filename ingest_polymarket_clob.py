@@ -28,7 +28,6 @@ import aiohttp
 import asyncio
 import json
 import time
-import random
 import websockets
 import math
 
@@ -36,7 +35,7 @@ from config import PM_CLOB_PING_EVERY_S, PM_CLOB_WS_URL
 from raw_logger import AsyncJsonlLogger
 from state import AppState, OrderbookLevel, AlignState
 from typing import Any, Dict, Iterable, List, Optional, Tuple
-from candles import TF_15M_MS, bucket_start_ms
+from candles import TF_15M_MS
 from config import PM_COIN_BY_BINANCE
 from resolve_polymarket_market import build_15m_slug, resolve_market_by_slug
 from maker_metrics import danger_score_bid, danger_score_ask
@@ -527,7 +526,8 @@ def _apply_book_snapshot(
         state.book.lag_ms = 0.0
         state.book.last_change_ms = 0.0
 
-    state.diag.clob_last_book_ms = recv_ms
+    state.diag.clob_last_book_ms = float(recv_ms)  # local receive time
+    state.diag.clob_last_book_event_ms = float(event_ms)  # Polymarket book time (msg["timestamp"])
 
 
 async def polymarket_clob_task(
@@ -734,13 +734,31 @@ async def polymarket_clob_autoresolve_task(
     async with aiohttp.ClientSession(timeout=timeout) as session:
         while True:
             try:
-                now_ms = int(time.time() * 1000)
-                bucket_ms = int(bucket_start_ms(now_ms, TF_15M_MS))
+                # Prefer Polymarket event-time for bucket selection (msg['timestamp']).
+                # Fallbacks:
+                #  1) estimate Polymarket/server time using local wall clock corrected by diag.clock_offset_ms
+                #  2) local wall clock (last resort)
+
+                book_event_ms = int(state.diag.clob_last_book_event_ms) if state.diag.clob_last_book_event_ms else 0
+
+                if book_event_ms > 0:
+                    # Best: actual book timestamp from Polymarket WS msg['timestamp']
+                    now_ms = book_event_ms
+                else:
+                    local_now_ms = int(time.time() * 1000)
+
+                    # Your convention: diag.clock_offset_ms = (local - server) in ms (positive => local ahead)
+                    clock_off_ms = float(getattr(state.diag, "clock_offset_ms", 0.0) or 0.0)
+
+                    # server_time ≈ local_time - (local - server)
+                    now_ms = int(local_now_ms - clock_off_ms)
+
+                bucket_start_ms = (now_ms // TF_15M_MS) * TF_15M_MS
 
                 # Only resolve on bucket change (or first run)
-                if bucket_ms != current_bucket_ms:
-                    current_bucket_ms = bucket_ms
-                    start_s = int(bucket_ms // 1000)
+                if bucket_start_ms != current_bucket_ms:
+                    current_bucket_ms = bucket_start_ms
+                    start_s = int(bucket_start_ms // 1000)
                     slug = build_15m_slug(coin, start_s)
 
                     meta = await resolve_market_by_slug(session, slug)
@@ -752,9 +770,13 @@ async def polymarket_clob_autoresolve_task(
                             "type": "market_resolve",
                             "binance_symbol": binance_symbol,
                             "coin": coin,
-                            "bucket_ms": bucket_ms,
+                            "bucket_ms": bucket_start_ms,
                             "slug": slug,
                             "resolved": meta is not None,
+                            "now_ms_used": now_ms,
+                            "last_book_event_ms": state.diag.clob_last_book_event_ms,
+                            "last_book_recv_ms": state.diag.clob_last_book_ms,
+                            "clock_offset_ms": state.diag.clock_offset_ms,
                         }
                     )
 
