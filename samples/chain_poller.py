@@ -36,7 +36,7 @@ import requests
 # ----------------------------
 load_dotenv(override=True)
 ANKR_API_KEY = os.getenv('ANKR_API_KEY')
-DEFAULT_ANKR_RPC = "https://rpc.ankr.com/polygon/"
+DEFAULT_ANKR_RPC = f"https://rpc.ankr.com/polygon/{ANKR_API_KEY}"
 DEFAULT_POLYGON_RPC = "https://polygon-rpc.com"
 
 CTF_EXCHANGE = "0x4bfb41d5b3570defd03c39a9a4d8de6bd8b8982e".lower()
