@@ -33,7 +33,6 @@ TOK_DECIMALS = 6  # Polymarket outcome token fill units commonly 1e6
 ORDERFILLED_SIG = "OrderFilled(bytes32,address,address,uint256,uint256,uint256,uint256,uint256)"
 ERC20_TRANSFER_SIG = "Transfer(address,address,uint256)"
 
-
 _dbg_path = Path("chain_marker.debug.jsonl")
 
 
@@ -295,10 +294,14 @@ async def chain_marker_task(
     exchange = CTF_EXCHANGE
     topic0 = keccak256_text(ORDERFILLED_SIG).lower()
 
+    # Keep a small, stable distance behind head (avoid querying unstable head).
+    FINALITY = 32
+    START_WARMUP = 5  # start near-live immediately, not a big backfill
+
     head = await asyncio.to_thread(eth_block_number, rpc_url)
     if start_block is None:
-        lb = 3 if mode == "polygon" else lookback_blocks
-        from_block = max(0, head - lb)
+        # Start close to "safe head" so the dashboard feels near-live immediately.
+        from_block = max(0, head - FINALITY - START_WARMUP)
     else:
         from_block = int(start_block)
 
@@ -315,12 +318,40 @@ async def chain_marker_task(
     while True:
         try:
             head = await asyncio.to_thread(eth_block_number, rpc_url)
-            if from_block > head:
+            safe_head = max(0, head - FINALITY)
+
+            # If we're caught up to safe_head, wait for more blocks.
+            if from_block > safe_head:
+                _dbg_log(
+                    {
+                        "type": "chain_marker_liveness",
+                        "ts_ms": int(time.time() * 1000),
+                        "rpc_mode": mode,
+                        "head": head,
+                        "safe_head": safe_head,
+                        "from_block": from_block,
+                        "behind_blocks": 0,
+                    }
+                )
                 await asyncio.sleep(poll_s)
                 continue
 
             # polygon-rpc.com can be finicky; force single-block
-            to_block = from_block if mode == "polygon" else min(head, from_block + max_block_span)
+            # For ankr: clamp to safe_head (not head) so we don't chase unstable tip.
+            to_block = from_block if mode == "polygon" else min(safe_head, from_block + max_block_span)
+
+            _dbg_log(
+                {
+                    "type": "chain_marker_liveness",
+                    "ts_ms": int(time.time() * 1000),
+                    "rpc_mode": mode,
+                    "head": head,
+                    "safe_head": safe_head,
+                    "from_block": from_block,
+                    "to_block": to_block,
+                    "behind_blocks": max(0, safe_head - from_block),
+                }
+            )
 
             filt_maker = {
                 "fromBlock": hex(from_block),
@@ -389,7 +420,7 @@ async def chain_marker_task(
                 if int(token_id) not in active:
                     continue
 
-                # --- NEW: side_final from USDC receipt delta (preserves old as fallback) ---
+                # --- side_final from USDC receipt delta (preserves old as fallback) ---
                 side_final = side_old
                 usdc_delta_raw: Optional[int] = None
                 try:
