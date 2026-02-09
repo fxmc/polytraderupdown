@@ -1,6 +1,7 @@
 # plot_ipc.py
 from __future__ import annotations
 from dataclasses import dataclass
+from typing import Optional
 
 _NAN = float("nan")
 
@@ -50,3 +51,21 @@ class PlotCtl:
     enabled: bool = True
     reset: bool = False
     win_start_s: float = 0.0   # <-- must be win_start_s (lowercase s)
+
+
+@dataclass(slots=True)
+class PlotMarker:
+    """
+    Discrete trader fill marker to overlay on Row 1 chart (prob space).
+    """
+    ts_s: float
+    win_start_ms: float
+
+    y: float              # prob price in [0,1]
+    token_id: int
+
+    role: str             # "MAKER" | "TAKER"
+    side: str             # "BUY" | "SELL"
+    size: float           # outcome tokens (scaled)
+    price: Optional[float]  # same as y usually, but keep explicit
+    tx_hash: str

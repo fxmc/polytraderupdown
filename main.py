@@ -37,6 +37,10 @@ from raw_logger import MultiSourceJsonlLogger
 from plot_tasks import plot_sampler_task
 from plot_process import plot_process_main
 from plot_ipc import PlotCtl
+from chain_marker_task import chain_marker_task
+
+TRADER_WALLET = "0x912a58103662ebe2e30328a305bc33131eca0f92"
+POLY_MODE = "ankr"
 
 
 def _run_id() -> str:
@@ -101,6 +105,7 @@ async def run_app(
     symbol: str,
     strike: float | None = None,
     polym_strike: float | None = None,
+    trader_wallet: str | None = None
 ) -> None:
     """Create and run the application."""
     state = AppState()
@@ -187,6 +192,9 @@ async def run_app(
     asyncio.create_task(loop_drift_task(state))
     asyncio.create_task(cloudflare_ntp_offset_task(state, every_s=120.0))
     asyncio.create_task(plot_sampler_task(state, plot_q))
+    if trader_wallet is not None:
+        asyncio.create_task(chain_marker_task(state, plot_q, wallet=trader_wallet, mode=POLY_MODE, poll_s=5.0, lookback_blocks=50, max_block_span=500))
+
     try:
         await app.run_async()
     finally:
@@ -359,13 +367,22 @@ def main() -> None:
         help="Optional Polymarket strike override (shown in resolver pane only).",
     )
 
+    p.add_argument(
+        "--trader-wallet",
+        type=str,
+        default=TRADER_WALLET,
+        help="Wallet to track"
+    )
     args = p.parse_args()
+    print(args.trader_wallet)
+    time.sleep(3)
 
     asyncio.run(
         run_app(
             symbol=args.symbol,
             strike=args.strike,
             polym_strike=args.polym_strike,
+            trader_wallet=args.trader_wallet
         )
     )
 
