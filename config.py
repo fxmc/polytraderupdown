@@ -56,9 +56,9 @@ DRIFT_BLEND_W: float = 0.70
 # --- Polymarket RTDS (resolver price feed) ---
 PM_RTDS_URL: str = "wss://ws-live-data.polymarket.com"
 PM_RTDS_TOPIC: str = "crypto_prices_chainlink"
-PM_PING_EVERY_S: float = 5.0  # docs suggest ping about every 5s :contentReference[oaicite:3]{index=3}
+PM_PING_EVERY_S: float = 5.0  # docs suggest ping about every 5s
 
-# Map Binance symbols to Chainlink RTDS symbols (filters expect slash form) :contentReference[oaicite:4]{index=4}
+# Map Binance symbols to Chainlink RTDS symbols (filters expect slash form)
 PM_CHAINLINK_SYMBOL_BY_BINANCE = {
     "BTCUSDT": "btc/usd",
     "ETHUSDT": "eth/usd",
@@ -85,3 +85,8 @@ PM_COIN_BY_BINANCE = {
     "SOLUSDT": "sol",
     "XRPUSDT": "xrp",
 }
+
+
+FV_QUIET_MS = 2500.0
+FV_SIGMA_FLOOR_K = 0.60
+FV_SIGMA_HOLD_MS = 15000.0

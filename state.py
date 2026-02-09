@@ -8,6 +8,8 @@ import time
 from collections import deque
 from dataclasses import dataclass, field
 from typing import Deque, List, Any
+from momentum import SecPriceBuffer
+from mom_zscore import MomentumZConfig, MomentumZTracker
 
 BURST_ALPHA: float = 0.15
 BURST_ON_RPS: float = 280.0
@@ -19,20 +21,18 @@ BIG_MOVE_PX: float = 35.0  # you can tune
 
 
 @dataclass(slots=True)
-class PlotSeries:
-    ts_s: Deque[float] = field(default_factory=lambda: deque(maxlen=1800))  # ~15 min @ 2Hz
-    yes_mid: Deque[float] = field(default_factory=lambda: deque(maxlen=1800))
-    no_mid: Deque[float] = field(default_factory=lambda: deque(maxlen=1800))
-    yes_bid: Deque[float] = field(default_factory=lambda: deque(maxlen=1800))
-    yes_ask: Deque[float] = field(default_factory=lambda: deque(maxlen=1800))
-    no_bid: Deque[float] = field(default_factory=lambda: deque(maxlen=1800))
-    no_ask: Deque[float] = field(default_factory=lambda: deque(maxlen=1800))
+class MomentumState:
+    buf: SecPriceBuffer = field(default_factory=lambda: SecPriceBuffer(max_secs=300))
 
-    # optional diagnostics / overlays
-    fv_yes: Deque[float] = field(default_factory=lambda: deque(maxlen=1800))
-    fv_no: Deque[float] = field(default_factory=lambda: deque(maxlen=1800))
-    fv_yes_nd: Deque[float] = field(default_factory=lambda: deque(maxlen=1800))
-    fv_no_nd: Deque[float] = field(default_factory=lambda: deque(maxlen=1800))
+    zt_fast: MomentumZTracker = field(default_factory=lambda: MomentumZTracker(
+        MomentumZConfig(horizons_s=[5, 10, 15, 30, 60], lookback=30, min_count=20)
+    ))
+    zt_slow: MomentumZTracker = field(default_factory=lambda: MomentumZTracker(
+        MomentumZConfig(horizons_s=[5, 10, 15, 30, 60], lookback=120, min_count=60)
+    ))
+
+    momz_fast: float = 0.0
+    momz_slow: float = 0.0
 
 
 @dataclass(slots=True)
@@ -293,6 +293,13 @@ class DriverHeaderState:
     fv_yes_nd: float = 0.0
     fv_no_nd: float = 0.0
 
+    sigma_rem_pct_raw: float = 0.0  # before hold/floor
+    sigma_rem_pct_eff: float = 0.0  # after hold/floor (what FV uses)
+    quiet_binance: bool = False
+    sigma_eff: float = 0.0  # sigma over remaining horizon (log), not percent
+
+    mu_over_sigma: float = 0.0
+
 
 @dataclass(slots=True)
 class ResolverHeaderState:
@@ -338,6 +345,9 @@ class DiagState:
 
     clob_last_book_event_ms: float = 0.0  # NEW: Polymarket msg["timestamp"] in ms
 
+    binance_last_trade_ms: float = 0.0  # Binance trade event time (T), ms epoch
+    binance_last_rx_ms: float = 0.0  # local receive timestamp, ms epoch
+
 
 def make_driver_tape() -> BurstState:
     """Create the Binance tape (20 lines)."""
@@ -360,9 +370,9 @@ class AppState:
     tape_resolver: BurstState = field(default_factory=make_resolver_tape)
     diag: DiagState = field(default_factory=DiagState)
     align: AlignState = field(default_factory=AlignState)
-    plot: PlotSeries = field(default_factory=PlotSeries)
     plot_ctl: PlotControlState = field(default_factory=PlotControlState)
     plot_ctl_q: Any = None
+    mom: MomentumState = field(default_factory=MomentumState)
 
 
 def burst_badge(level: int) -> str:
@@ -647,18 +657,6 @@ def update_tape_on_trade(
 
 
 def reset_plot_buffers(state: AppState) -> None:
-    ps = state.plot
-    ps.ts_s.clear()
-    ps.yes_mid.clear()
-    ps.no_mid.clear()
-    ps.yes_bid.clear()
-    ps.yes_ask.clear()
-    ps.no_bid.clear()
-    ps.no_ask.clear()
-    ps.fv_yes.clear()
-    ps.fv_no.clear()
-    ps.fv_yes_nd.clear()
-    ps.fv_no_nd.clear()
     state.plot_ctl.n_samples = 0
     state.plot_ctl.last_sample_ms = 0.0
 

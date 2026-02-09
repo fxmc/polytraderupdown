@@ -2,11 +2,14 @@
 from __future__ import annotations
 from dataclasses import dataclass
 
+_NAN = float("nan")
+
 
 @dataclass(slots=True)
 class PlotSnap:
     ts_s: float
     win_start_ms: float  # NEW: used to detect 15m roll in the plot process
+
     # Row 1: Polymarket (prob space)
     yes_mid: float
     no_mid: float
@@ -20,13 +23,25 @@ class PlotSnap:
     # Row 3: microstructure diagnostic
     yes_spread: float
     no_spread: float
-    # optional alternative: imbalance (if you prefer)
-    imb_yes_l1: float
-    imb_no_l1: float
+
+    # Imbalance (optional horizons)
+    imb_yes_l1: float = _NAN
+    imb_no_l1: float = _NAN
+    imb_yes_l5: float = _NAN
+    imb_no_l5: float = _NAN
+
+    # Row 4: momentum / edge diagnostics (all optional; default NaN)
+    pressure: float = _NAN
+    momz_fast: float = _NAN
+    momz_slow: float = _NAN
+    mu_over_sigma: float = _NAN  # "drift normalized by vol" (unitless z-ish)
+    sigma_eff: float = _NAN      # useful when debugging FV quiet/hold behavior
+
+    muT_over_sigmaT: float = _NAN  # consistent with renderer (mu_T / sigma_T)
 
     # Row 4: edge diagnostics (optional but recommended)
-    fv_gap_nd: float          # fv_yes_nd - canon.mid (YES-space)
-    mid_micro_gap: float      # canon.mid - canon.micro (YES-space)
+    fv_gap_nd: float = _NAN          # fv_yes_nd - canon.mid (YES-space)
+    mid_micro_gap: float = _NAN      # canon.mid - canon.micro (YES-space)
 
 
 @dataclass(slots=True)

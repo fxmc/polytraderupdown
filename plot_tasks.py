@@ -7,6 +7,22 @@ import math
 
 from plot_ipc import PlotSnap, PlotCtl
 from state import AppState, reset_plot_buffers
+from state import pressure_imbalance_notional_5s_live
+
+_NAN = float("nan")
+
+
+def _get(obj, path: str, default=_NAN):
+    """
+    Safe dotted-path getter: _get(state, "mom.pressure") etc.
+    Returns default on any missing attribute.
+    """
+    cur = obj
+    for part in path.split("."):
+        if cur is None:
+            return default
+        cur = getattr(cur, part, None)
+    return default if cur is None else cur
 
 
 def _mid(bid: float | None, ask: float | None) -> float | None:
@@ -19,7 +35,7 @@ def _mid(bid: float | None, ask: float | None) -> float | None:
     return 0.5 * (bid + ask)
 
 
-def _nan(x: float | None) -> float:
+def _nan(x: float | None = None) -> float:
     return float("nan") if x is None else float(x)
 
 
@@ -47,6 +63,7 @@ async def plot_sampler_task(state: AppState, plot_q) -> None:
     while True:
         hz = max(0.1, float(state.plot_ctl.sample_hz))
         dt = 1.0 / hz
+        # Only send if plotting window is meant to be shown
 
         # --- clock gate: do not plot until offset is populated ---
         src = getattr(state.diag, "clock_offset_src", "")
@@ -66,39 +83,50 @@ async def plot_sampler_task(state: AppState, plot_q) -> None:
             reset_plot_buffers(state)
 
             # also tell plot process to clear and anchor at current window start
-            ws = float(state.plot_ctl.active_win_start_ms or 0.0)
-            try:
-                state.plot_ctl_q.put_nowait(
-                    PlotCtl(
-                        show=state.plot_ctl.show,
-                        enabled=state.plot_ctl.enabled,
-                        reset=True,
-                        win_start_s=(ws / 1000.0) if ws > 0.0 else 0.0,
+            ws = float(state.book.market_start_ms) if state.book.market_start_ms else 0.0
+            if ws <= 0.0 and state.driver.win_start_ms > 0.0:
+                ws = float(state.driver.win_start_ms)
+            if state.plot_ctl_q is not None:
+                try:
+                    state.plot_ctl_q.put_nowait(
+                        PlotCtl(
+                            show=state.plot_ctl.show,
+                            enabled=state.plot_ctl.enabled,
+                            reset=True,
+                            win_start_s=(ws / 1000.0) if ws > 0.0 else 0.0,
+                        )
                     )
-                )
-            except Exception:
-                pass
+                except Exception:
+                    pass
 
         # 15m roll reset
         ws = float(state.book.market_start_ms) if state.book.market_start_ms else 0.0
+        if ws <= 0.0 and state.driver.win_start_ms > 0.0:
+            ws = float(state.driver.win_start_ms)
+
         ex = float(state.book.market_end_ms) if state.book.market_end_ms else 0.0
         ctl = state.plot_ctl
+
+        # Only send if plotting window is meant to be shown
+        if (not ctl.show) or (not ctl.enabled):
+            continue
 
         if ws > 0.0 and ws != ctl.active_win_start_ms:
             ctl.active_win_start_ms = ws
             ctl.active_expiry_ms = ex
             reset_plot_buffers(state)
-            try:
-                state.plot_ctl_q.put_nowait(
-                    PlotCtl(
-                        show=ctl.show,
-                        enabled=ctl.enabled,
-                        reset=True,
-                        win_start_s=ws / 1000.0
+            if state.plot_ctl_q is not None:
+                try:
+                    state.plot_ctl_q.put_nowait(
+                        PlotCtl(
+                            show=ctl.show,
+                            enabled=ctl.enabled,
+                            reset=True,
+                            win_start_s=ws / 1000.0
+                        )
                     )
-                )
-            except Exception:
-                pass
+                except Exception:
+                    pass
 
         # schedule tick (skip backlog if we fell behind)
         next_t += dt
@@ -107,9 +135,7 @@ async def plot_sampler_task(state: AppState, plot_q) -> None:
             next_t = now
         await asyncio.sleep(max(0.0, next_t - time.perf_counter()))
 
-        # Only send if plotting window is meant to be shown
-        if not ctl.show:
-            continue
+
 
         # --- Polymarket L1 ---
         yb = state.book.yes_bids[0].px if state.book.yes_bids else None
@@ -119,7 +145,6 @@ async def plot_sampler_task(state: AppState, plot_q) -> None:
 
         ym = _mid(yb, ya)
         nm = _mid(nb, na)
-
 
         # --- FV (NO DRIFT) ---
         fv_y = float(state.book.fv_yes_nd) if state.book.fv_yes_nd > 0.0 else float("nan")
@@ -134,6 +159,8 @@ async def plot_sampler_task(state: AppState, plot_q) -> None:
         no_sp  = _safe_spread(nb, na)
         imb_y1 = _imb(state.book.yes_bids, state.book.yes_asks, 1)
         imb_n1 = _imb(state.book.no_bids, state.book.no_asks, 1)
+        imb_y5 = _imb(state.book.yes_bids, state.book.yes_asks, 5)
+        imb_n5 = _imb(state.book.no_bids, state.book.no_asks, 5)
 
         # --- Row 4 diagnostics (YES space, mirror-safe) ---
         c = state.book.canon
@@ -144,23 +171,47 @@ async def plot_sampler_task(state: AppState, plot_q) -> None:
         mid_micro_gap = (canon_mid - canon_micro) if (not math.isnan(canon_mid) and not math.isnan(canon_micro)) else float("nan")
 
         local_now_ms = int(time.time() * 1000)
-        clock_off_ms = float(getattr(state.diag, "clock_offset_ms", 0.0) or 0.0)
+        clock_off_ms = off
         pm_now_ms = int(local_now_ms - clock_off_ms)
         ts_s = pm_now_ms / 1000.0
+
+        mu_T = float(getattr(state.driver, "mu_T", 0.0) or 0.0)
+        sigma_T = float(getattr(state.driver, "sigma_eff", 0.0) or 0.0)
+        muT_over_sigmaT = (mu_T / sigma_T) if sigma_T > 1e-12 else float("nan")
 
         snap = PlotSnap(
             ts_s=ts_s,
             win_start_ms=ws,   # window id on every snap
+
+            # Row 1
             yes_mid=_nan(ym),
             no_mid=_nan(nm),
-            fv_yes_nd=fv_y,
-            fv_no_nd=fv_n,
-            px_binance=px_bin,
-            strike=strike,
-            yes_spread=yes_sp,
-            no_spread=no_sp,
-            imb_yes_l1=imb_y1,
-            imb_no_l1=imb_n1,
+            fv_yes_nd=_nan(fv_y),
+            fv_no_nd=_nan(fv_n),
+
+            # Row 2
+            px_binance=_nan(px_bin),
+            strike=_nan(strike),
+
+            # Row 3
+            yes_spread=_nan(yes_sp),
+            no_spread=_nan(no_sp),
+            imb_yes_l1=_nan(imb_y1),
+            imb_no_l1=_nan(imb_n1),
+
+            # (optional horizons — fill if you have them, else omit or set NaN)
+            imb_yes_l5=_nan(imb_y5),
+            imb_no_l5=_nan(imb_n5),
+
+            # Row 4: momentum/diagnostics
+            pressure=pressure_imbalance_notional_5s_live(state.tape_driver) if state.tape_driver else float("nan"),
+            momz_fast=float(getattr(state.driver, "mom_z_combo_fast", float("nan")) or float("nan")),
+            momz_slow=float(getattr(state.driver, "mom_z_combo_slow", float("nan")) or float("nan")),
+
+            # leave these NaN until FV/vol wiring is done
+            mu_over_sigma=state.driver.mu_over_sigma,
+            sigma_eff=state.driver.sigma_eff,
+            muT_over_sigmaT=muT_over_sigmaT,
             fv_gap_nd=fv_gap_nd,
             mid_micro_gap=mid_micro_gap,
         )

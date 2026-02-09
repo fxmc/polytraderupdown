@@ -450,10 +450,17 @@ def render_right_top(state: AppState, height: int) -> ANSI:
     lines.append(f"sigma_rem%              : {d.sigma_rem_pct:6.2f}%")
 
     lines.append(f"P_yes                   : {d.prob_yes:0.4f}  (no-drift {d.p_yes_nd:0.4f})  Δ {d.prob_yes - d.p_yes_nd:+0.4f}")
+
+    # lines.append(f"drift mu_hat/s          : {d.mu_hat_per_s:+0.6e}   mu_T(rem) {d.mu_T:+0.6e}")
+    # sigma_T = d.sigma_rem_pct / 100.0
+    # ratio = (d.mu_T / sigma_T) if sigma_T > 1e-12 else 0.0
+    # lines.append(f"drift/sigma ratio       : {ratio:+0.2f}  (mu_T/sigma_T)")
+
     lines.append(f"drift mu_hat/s          : {d.mu_hat_per_s:+0.6e}   mu_T(rem) {d.mu_T:+0.6e}")
-    sigma_T = d.sigma_rem_pct / 100.0
+    # IMPORTANT: use the actual remaining-horizon sigma used by FV (log units), not the display percent.
+    sigma_T = float(getattr(d, "sigma_eff", 0.0) or 0.0)  # sigma over remaining horizon (log)
     ratio = (d.mu_T / sigma_T) if sigma_T > 1e-12 else 0.0
-    lines.append(f"drift/sigma ratio       : {ratio:+0.2f}  (mu_T/sigma_T)")
+    lines.append(f"drift/sigma ratio       : {ratio:+0.2f}  (mu_T/sigma_eff)")
 
     lines.append(f"mom pts(%)              : 5s {d.mom_5s:+7.2f}({d.mom_5s_pct:+0.3f}%)  10s {d.mom_10s:+7.2f}({d.mom_10s_pct:+0.3f}%)  15s {d.mom_15s:+7.2f}({d.mom_15s_pct:+0.3f}%)")
     lines.append(f"                         30s {d.mom_30s:+7.2f}({d.mom_30s_pct:+0.3f}%)   1m {d.mom_1m:+7.2f}({d.mom_1m_pct:+0.3f}%)   5m {d.mom_5m:+7.2f}({d.mom_5m_pct:+0.3f}%)")

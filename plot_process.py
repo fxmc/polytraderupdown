@@ -43,6 +43,15 @@ def plot_process_main(q, ctl_q=None, *, maxlen=1800):
 
     imb_y1 = deque(maxlen=maxlen)
     imb_n1 = deque(maxlen=maxlen)
+    imb_y5 = deque(maxlen=maxlen)
+    imb_n5 = deque(maxlen=maxlen)
+
+    # Row 4 momentum / diagnostics
+    pressure = deque(maxlen=maxlen)
+    momz_fast = deque(maxlen=maxlen)
+    momz_slow = deque(maxlen=maxlen)
+    mu_over_sigma = deque(maxlen=maxlen)
+    sigma_eff = deque(maxlen=maxlen)  # optional debug
 
     fv_gap_nd = deque(maxlen=maxlen)
     mid_micro_gap = deque(maxlen=maxlen)
@@ -85,17 +94,36 @@ def plot_process_main(q, ctl_q=None, *, maxlen=1800):
 
     # Row 3: spread OR imbalance (we’ll plot spread by default)
     (l_sp_y,) = ax3.plot([], [], lw=1, label="YES spread")
-    (l_sp_n,) = ax3.plot([], [], lw=1, label="NO spread")
+    # (l_sp_n,) = ax3.plot([], [], lw=1, label="NO spread")
+    # (l_mm,)  = ax3.plot([], [], lw=1, label="mid-micro (YES)")
     ax3.legend(
         loc="center left",
         bbox_to_anchor=(1.02, 0.5),
         frameon=False,
     )
     ax3.set_ylabel("spr")
+    ax3.set_ylim(0.0, 0.2)
+
+    ax3b = ax3.twinx()
+    (l_ib_y1,) = ax3b.plot([], [], lw=1, linestyle=":", alpha=0.8, label="imb YES L1")
+    # (l_ib_n1,) = ax3b.plot([], [], lw=1, linestyle=":", alpha=0.8, label="imb NO L1")
+    (l_ib_y5,) = ax3b.plot([], [], lw=1, linestyle="--", alpha=0.8, label="imb YES L5")
+    # (l_ib_n5,) = ax3b.plot([], [], lw=1, linestyle="--", alpha=0.8, label="imb NO L5")
+    ax3b.set_ylabel("imb")
+    ax3b.set_ylim(-1.05, 1.05)
 
     # Row 4: diagnostics
-    (l_gap,) = ax4.plot([], [], lw=1, label="FVgap ND (YES)")
-    (l_mm,)  = ax4.plot([], [], lw=1, label="mid-micro (YES)")
+    # (l_gap,) = ax4.plot([], [], lw=1, label="FVgap ND (YES)")
+    (l_p,)   = ax4.plot([], [], lw=1, label="pressure")
+    (l_f,)   = ax4.plot([], [], lw=1, label="momz_fast")
+    (l_s,)   = ax4.plot([], [], lw=1, label="momz_slow")
+    # (l_se,)  = ax4.plot([], [], lw=1, linestyle=":", alpha=0.8, label="sigma_eff")  # optional
+
+    ax4b = ax4.twinx()
+    (l_mus,) = ax4b.plot([], [], lw=1, label="mu/sigma", color='red')
+    ax4b.set_ylabel("mu/sigma")
+    ax4b.set_ylim(-10, 10)
+
     ax4.legend(
         loc="center left",
         bbox_to_anchor=(1.02, 0.5),
@@ -119,8 +147,18 @@ def plot_process_main(q, ctl_q=None, *, maxlen=1800):
         strike.clear()
         yes_spread.clear()
         no_spread.clear()
+
         imb_y1.clear()
         imb_n1.clear()
+        imb_y5.clear()
+        imb_n5.clear()
+
+        pressure.clear()
+        momz_fast.clear()
+        momz_slow.clear()
+        mu_over_sigma.clear()
+        sigma_eff.clear()
+
         fv_gap_nd.clear()
         mid_micro_gap.clear()
 
@@ -183,6 +221,15 @@ def plot_process_main(q, ctl_q=None, *, maxlen=1800):
 
             imb_y1.append(snap.imb_yes_l1)
             imb_n1.append(snap.imb_no_l1)
+            imb_y5.append(getattr(snap, "imb_yes_l5", float("nan")))
+            imb_n5.append(getattr(snap, "imb_no_l5", float("nan")))
+
+            # momentum panel
+            pressure.append(getattr(snap, "pressure", float("nan")))
+            momz_fast.append(getattr(snap, "momz_fast", float("nan")))
+            momz_slow.append(getattr(snap, "momz_slow", float("nan")))
+            mu_over_sigma.append(getattr(snap, "muT_over_sigmaT", float("nan")))
+            sigma_eff.append(getattr(snap, "sigma_eff", float("nan")))
 
             fv_gap_nd.append(snap.fv_gap_nd)
             mid_micro_gap.append(snap.mid_micro_gap)
@@ -210,12 +257,22 @@ def plot_process_main(q, ctl_q=None, *, maxlen=1800):
         x, y = _nanfilter(xs, list(strike));  l_k.set_data(x, y)
 
         # Row 3 (spread default)
+        x, y = _nanfilter(xs, list(imb_y1)); l_ib_y1.set_data(x, y)
+        # x, y = _nanfilter(xs, list(imb_n1)); l_ib_n1.set_data(x, y)
+        x, y = _nanfilter(xs, list(imb_y5)); l_ib_y5.set_data(x, y)
+        # x, y = _nanfilter(xs, list(imb_n5)); l_ib_n5.set_data(x, y)
+
         x, y = _nanfilter(xs, list(yes_spread)); l_sp_y.set_data(x, y)
-        x, y = _nanfilter(xs, list(no_spread));  l_sp_n.set_data(x, y)
+        # x, y = _nanfilter(xs, list(no_spread));  l_sp_n.set_data(x, y)
 
         # Row 4
-        x, y = _nanfilter(xs, list(fv_gap_nd));     l_gap.set_data(x, y)
-        x, y = _nanfilter(xs, list(mid_micro_gap)); l_mm.set_data(x, y)
+        # x, y = _nanfilter(xs, list(fv_gap_nd));     l_gap.set_data(x, y)
+        x, y = _nanfilter(xs, list(pressure));      l_p.set_data(x, y)
+        x, y = _nanfilter(xs, list(momz_fast));     l_f.set_data(x, y)
+        x, y = _nanfilter(xs, list(momz_slow));     l_s.set_data(x, y)
+        x, y = _nanfilter(xs, list(mu_over_sigma)); l_mus.set_data(x, y)
+        # x, y = _nanfilter(xs, list(sigma_eff));     l_se.set_data(x, y)
+        # x, y = _nanfilter(xs, list(mid_micro_gap)); l_mm.set_data(x, y)
 
         # Full 15m horizon
         ax4.set_xlim(0.0, max(10.0, min(900.0, xmax)))

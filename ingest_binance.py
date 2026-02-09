@@ -9,6 +9,7 @@ Connects to the Binance WS trade stream and updates:
 
 from __future__ import annotations
 
+import math
 import json
 import time
 from typing import Any, Dict, Optional
@@ -28,7 +29,8 @@ from raw_logger import AsyncJsonlLogger
 from state import AppState, now_ms, update_tape_on_trade
 from momentum import SecPriceBuffer, mom_pct, mom_points, update_sec_price
 from mom_zscore import MomentumZConfig, MomentumZTracker
-from config import BINANCE_STREAM_SUFFIX, BINANCE_WS_BASE, VOL_R_CLIP_BY_SYMBOL, VOL_DRIVER, VOL_BLEND_W
+from config import BINANCE_STREAM_SUFFIX, BINANCE_WS_BASE, VOL_R_CLIP_BY_SYMBOL, VOL_DRIVER, VOL_BLEND_W, \
+    FV_SIGMA_FLOOR_K, FV_QUIET_MS, FV_SIGMA_HOLD_MS
 from volatility import VolStack, sigma_over_seconds
 from fair_value import digital_prob_normal_points, digital_prob_lognormal, digital_prob_lognormal_drift
 from config import FV_USE_DRIFT, DRIFT_DRIVER, DRIFT_BLEND_W
@@ -86,8 +88,8 @@ async def binance_ws_task(state: AppState, logger: AsyncJsonlLogger, symbol: str
 
     while True:
         try:
-            async with websockets.connect(url, ping_interval=20, ping_timeout=20) as ws:
-                async for raw in ws:
+            async with websockets.connect(url, ping_interval=20, ping_timeout=20) as binance_socket:
+                async for raw in binance_socket:
                     t0 = time.perf_counter()
 
                     recv_ms = now_ms()
@@ -102,6 +104,8 @@ async def binance_ws_task(state: AppState, logger: AsyncJsonlLogger, symbol: str
                     is_buyer_maker = bool(parsed["is_buyer_maker"])
                     trade_ts_ms = float(parsed["trade_ts_ms"])
                     trade_ms = trade_ts_ms if trade_ts_ms > 0.0 else now_ms()
+                    state.diag.binance_last_rx_ms = recv_ms
+                    state.diag.binance_last_trade_ms = trade_ms
                     lag_raw_ms = max(0.0, recv_ms - trade_ts_ms) if trade_ts_ms > 0 else 0.0
                     lag_ms = max(0.0, lag_raw_ms - state.diag.clock_offset_ms)
 
@@ -172,8 +176,8 @@ async def binance_ws_task(state: AppState, logger: AsyncJsonlLogger, symbol: str
                         state.driver.vol_5m = 100.0 * sigma15_300
 
                         # --- choose driver variance ---
-                        v60 = v["v60"]
-                        vslow = v["v_slow"]
+                        v60 = float(v.get("v60", 0.0) or 0.0)
+                        vslow = float(v.get("v_slow", 0.0) or 0.0)
 
                         if VOL_DRIVER == "rv60":
                             v_drive = v60 if v60 > 0.0 else vslow
@@ -185,17 +189,24 @@ async def binance_ws_task(state: AppState, logger: AsyncJsonlLogger, symbol: str
                             v_drive = (w * v60 + (1.0 - w) * vslow) if v60 > 0.0 else vslow
 
                         # --- remaining-horizon sigma (log) ---
-                        sigma_rem = sigma_over_seconds(v_drive, tte_s)
-                        state.driver.sigma_rem_pct = 100.0 * sigma_rem
+                        sigma_raw = sigma_over_seconds(v_drive, tte_s)  # log-sigma over remaining horizon
+                        state.driver.sigma_rem_pct_raw = 100.0 * sigma_raw
+
+                        # Publish for UI + plot debug
+                        state.driver.quiet_binance = False
+                        state.driver.sigma_rem_pct_eff = 100.0 * sigma_raw
+                        state.driver.sigma_rem_pct = state.driver.sigma_rem_pct_eff  # keep meaning as "effective"
+                        state.driver.sigma_eff = sigma_raw
+
 
                         # --- fair value: lognormal digital ---
-                        p_yes = digital_prob_lognormal(price, state.driver.strike, sigma_rem)
+                        p_yes = digital_prob_lognormal(price, state.driver.strike, sigma_raw)
                         state.driver.prob_yes = p_yes
                         state.driver.fv_yes = p_yes
                         state.driver.fv_no = 1.0 - p_yes
 
                         # --- optional normal-in-points diagnostic ---
-                        sigma_pts_rem = price * sigma_rem
+                        sigma_pts_rem = price * sigma_raw
                         p_yes_norm = digital_prob_normal_points(price, state.driver.strike, sigma_pts_rem)
                         state.driver.prob_yes_norm = p_yes_norm
 
@@ -211,14 +222,18 @@ async def binance_ws_task(state: AppState, logger: AsyncJsonlLogger, symbol: str
                             w = float(DRIFT_BLEND_W)
                             mu_hat = (w * mu60 + (1.0 - w) * mu_slow) if mu60 != 0.0 else mu_slow
 
+                        sigma_1s_raw = math.sqrt(v_drive) if v_drive > 0.0 else 0.0
+                        mu_over_sigma = (mu_hat / sigma_1s_raw) if sigma_1s_raw > 1e-12 else 0.0
+                        state.driver.mu_over_sigma = mu_over_sigma
+
                         mu_T = mu_hat * tte_s  # expected log-return over remaining horizon
 
                         if FV_USE_DRIFT:
-                            p_yes = digital_prob_lognormal_drift(price, state.driver.strike, sigma_rem, mu_T)
+                            p_yes = digital_prob_lognormal_drift(price, state.driver.strike, sigma_raw, mu_T)
                         else:
-                            p_yes = digital_prob_lognormal(price, state.driver.strike, sigma_rem)
+                            p_yes = digital_prob_lognormal(price, state.driver.strike, sigma_raw)
 
-                        p_yes_nd = digital_prob_lognormal(price, state.driver.strike, sigma_rem)
+                        p_yes_nd = digital_prob_lognormal(price, state.driver.strike, sigma_raw)
                         state.driver.p_yes_nd = p_yes_nd
                         state.driver.fv_yes_nd = p_yes_nd
                         state.driver.fv_no_nd = 1.0 - p_yes_nd
@@ -238,7 +253,7 @@ async def binance_ws_task(state: AppState, logger: AsyncJsonlLogger, symbol: str
                         state.driver.mu_T = mu_T
 
                         # compute no-drift baseline for diagnostics
-                        p_yes_nd = digital_prob_lognormal(price, state.driver.strike, sigma_rem)
+                        p_yes_nd = digital_prob_lognormal(price, state.driver.strike, sigma_raw)
                         state.driver.p_yes_nd = p_yes_nd
 
                         # --- Binance -> CLOB alignment impulse (1Hz, bounded) ---
@@ -307,6 +322,8 @@ async def binance_ws_task(state: AppState, logger: AsyncJsonlLogger, symbol: str
                                 "DRIFT_DRIVER": DRIFT_DRIVER,
                                 "fv_ok": fv_ok,
                                 "fv_reason": fv_reason,
+                                "sigma_raw": sigma_raw,
+                                "sigma_eff": sigma_raw,
                             }
                         )
 
