@@ -52,6 +52,10 @@ class PlotCtl:
     reset: bool = False
     win_start_s: float = 0.0   # <-- must be win_start_s (lowercase s)
 
+    # NEW: deterministic YES/NO token mapping for markers
+    yes_token_id: Optional[int] = None
+    no_token_id: Optional[int] = None
+
 
 @dataclass(slots=True)
 class PlotMarker:

@@ -807,6 +807,23 @@ async def polymarket_clob_autoresolve_task(
                     state.book.last_change_ms = 0.0
                     state.book.pulse = "."
 
+                    # Tell plot process the new market's YES/NO token ids (deterministic marker colors)
+                    try:
+                        q = getattr(state, "plot_ctl_q", None)
+                        if q is not None:
+                            q.put_nowait(
+                                PlotCtl(
+                                    show=True,
+                                    enabled=True,
+                                    reset=True,
+                                    win_start_s=float(bucket_start_ms) / 1000.0,
+                                    yes_token_id=int(meta.yes_asset_id),
+                                    no_token_id=int(meta.no_asset_id),
+                                )
+                            )
+                    except Exception:
+                        pass
+
                     logger.log(
                         {
                             "ts_local_ms": _now_ms(),

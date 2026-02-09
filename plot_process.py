@@ -303,10 +303,27 @@ def plot_process_main(q, ctl_q=None, *, maxlen=1800):
                         if isinstance(ctl, PlotCtl):
                             show = ctl.show
                             enabled = ctl.enabled
+
+                            # NEW: deterministic YES/NO token mapping (and clear old mapping on reset)
+                            yid = getattr(ctl, "yes_token_id", None)
+                            nid = getattr(ctl, "no_token_id", None)
+
                             if getattr(ctl, "reset", False):
                                 _clear_all()
+                                # reset the token-id mapping across market rolls
+                                tokid_to_token.clear()
+                                if yid is not None:
+                                    tokid_to_token[int(yid)] = "YES"
+                                if nid is not None:
+                                    tokid_to_token[int(nid)] = "NO"
                                 if getattr(ctl, "win_start_s", 0.0) > 0.0:
                                     base_ws_s = float(ctl.win_start_s)
+                            else:
+                                # non-reset updates are allowed too (just refresh mapping)
+                                if yid is not None:
+                                    tokid_to_token[int(yid)] = "YES"
+                                if nid is not None:
+                                    tokid_to_token[int(nid)] = "NO"
                 except Exception:
                     pass
 
