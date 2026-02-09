@@ -7,10 +7,12 @@ import math
 import time
 import matplotlib.pyplot as plt
 import numpy as np
+import os
 
 from collections import deque
 from plot_ipc import PlotSnap, PlotCtl, PlotMarker
 from pathlib import Path
+
 
 def _nanfilter(xs, ys):
     outx, outy = [], []
@@ -78,11 +80,62 @@ def plot_process_main(q, ctl_q=None, *, maxlen=1800):
         fv_gap_nd = deque(maxlen=maxlen)
         mid_micro_gap = deque(maxlen=maxlen)
 
-        # --- markers (buy/sell) ---
-        mx_buy: deque[float] = deque(maxlen=maxlen)
-        my_buy: deque[float] = deque(maxlen=maxlen)
-        mx_sell: deque[float] = deque(maxlen=maxlen)
-        my_sell: deque[float] = deque(maxlen=maxlen)
+        # --- markers (YES/NO × BUY/SELL × MAKER/TAKER) ---
+        # Token-id -> {"YES","NO"} mapping (optional exact override via env vars)
+        yes_tok_env = (os.getenv("PLOT_YES_TOKEN_ID", "") or "").strip()
+        no_tok_env = (os.getenv("PLOT_NO_TOKEN_ID", "") or "").strip()
+        tokid_to_token: dict[int, str] = {}
+        try:
+            if yes_tok_env:
+                tokid_to_token[int(yes_tok_env)] = "YES"
+        except Exception:
+            pass
+        try:
+            if no_tok_env:
+                tokid_to_token[int(no_tok_env)] = "NO"
+        except Exception:
+            pass
+
+        TOKENS = ("YES", "NO")
+        SIDES = ("BUY", "SELL")
+        ROLES = ("MAKER", "TAKER")
+
+        def _learn_token(tokid: int) -> str:
+            """
+            Best-effort mapping when no explicit env override is set.
+            We default FIRST-seen token_id to NO (keeps your current blue/orange),
+            and SECOND distinct token_id to YES.
+            """
+            if tokid in tokid_to_token:
+                return tokid_to_token[tokid]
+
+            # If already have both, default to NO for unknowns
+            vals = set(tokid_to_token.values())
+            if "YES" in vals and "NO" in vals:
+                tokid_to_token[tokid] = "NO"
+                return "NO"
+
+            # Assign next free slot, with NO first (preserves old look)
+            if "NO" not in vals:
+                tokid_to_token[tokid] = "NO"
+                return "NO"
+            tokid_to_token[tokid] = "YES"
+            return "YES"
+
+        # Per-group deques
+        mxy: dict[tuple[str, str, str], tuple[deque[float], deque[float]]] = {}
+        for token in TOKENS:
+            for side in SIDES:
+                for role in ROLES:
+                    mxy[(token, side, role)] = (deque(maxlen=maxlen), deque(maxlen=maxlen))
+
+        # Color mapping (explicit as requested)
+        color_by = {
+            ("YES", "BUY"): "green",
+            ("YES", "SELL"): "red",
+            ("NO", "BUY"): "blue",
+            ("NO", "SELL"): "orange",
+        }
 
         enabled = True
         show = True
@@ -103,9 +156,39 @@ def plot_process_main(q, ctl_q=None, *, maxlen=1800):
         (l_fy,)  = ax1.plot([], [], lw=1, linestyle=":", alpha=0.8, label="FV YES (ND)")
         (l_fn,)  = ax1.plot([], [], lw=1, linestyle=":", alpha=0.8, label="FV NO (ND)")
 
-        # --- marker scatters (no explicit colors; let matplotlib cycle/default) ---
-        scat_buy = ax1.scatter([], [], marker="^", s=25, label="Trader BUY")
-        scat_sell = ax1.scatter([], [], marker="v", s=25, label="Trader SELL")
+        # --- marker scatters (8 groups; compact legend) ---
+        # MAKER = hollow (facecolors none, colored edge), TAKER = filled
+        scat: dict[tuple[str, str, str], any] = {}
+        for token in TOKENS:
+            for side in SIDES:
+                for role in ROLES:
+                    c = color_by[(token, side)]
+                    mk = "^" if side == "BUY" else "v"
+
+                    # Only 4 legend entries total: use the TAKER scatter for labels
+                    lbl = f"{token} {side}" if role == "TAKER" else "_nolegend_"
+
+                    if role == "MAKER":
+                        scat[(token, side, role)] = ax1.scatter(
+                            [], [],
+                            marker=mk,
+                            s=28,
+                            facecolors="none",
+                            edgecolors=c,
+                            linewidths=1.5,
+                            label=lbl,
+                        )
+                    else:
+                        scat[(token, side, role)] = ax1.scatter(
+                            [], [],
+                            marker=mk,
+                            s=25,
+                            c=c,
+                            edgecolors="none",
+                            label=lbl,
+                        )
+
+        ax1.set_title("Fills: hollow=MAKER, filled=TAKER")
 
         ax1.set_ylim(-0.02, 1.02)
         ax1.legend(
@@ -177,11 +260,14 @@ def plot_process_main(q, ctl_q=None, *, maxlen=1800):
             fv_yes_nd.clear()
             fv_no_nd.clear()
 
-            mx_buy.clear()
-            my_buy.clear()
+            # mx_buy.clear()
+            # my_buy.clear()
+            # mx_sell.clear()
+            # my_sell.clear()
 
-            mx_sell.clear()
-            my_sell.clear()
+            for (mx, my) in mxy.values():
+                mx.clear()
+                my.clear()
 
             px_bin.clear()
             strike.clear()
@@ -242,12 +328,20 @@ def plot_process_main(q, ctl_q=None, *, maxlen=1800):
                 if isinstance(snap, PlotMarker):
                     got_marker = True
 
-                    if snap.side.upper() == "BUY":
-                        mx_buy.append(snap.ts_s)
-                        my_buy.append(snap.y)
-                    else:
-                        mx_sell.append(snap.ts_s)
-                        my_sell.append(snap.y)
+                    side = (getattr(snap, "side", "") or "").upper()
+                    role = (getattr(snap, "role", "") or "").upper()
+                    if side not in ("BUY", "SELL"):
+                        continue
+                    if role not in ("MAKER", "TAKER"):
+                        continue
+
+                    token = _learn_token(int(snap.token_id))
+                    mx, my = mxy[(token, side, role)]
+                    mx.append(float(snap.ts_s))
+                    my.append(float(snap.y))
+
+                    # IMPORTANT: PlotMarker must not fall through into PlotSnap handling
+                    continue
 
                 # --- snaps ---
                 if not isinstance(snap, PlotSnap):
@@ -302,23 +396,17 @@ def plot_process_main(q, ctl_q=None, *, maxlen=1800):
             xmax = xs[-1]
 
             # Markers: convert absolute ts_s to relative x like everything else.
-            mbx = [t - base_ws_s for t in mx_buy]
-            msx = [t - base_ws_s for t in mx_sell]
-
-            bx, by = _nanfilter(mbx, list(my_buy))
-            sx, sy = _nanfilter(msx, list(my_sell))
-
-            if scat_buy is not None:
-                if bx:
-                    scat_buy.set_offsets(np.column_stack([bx, by]))
+            for key, (mx, my) in mxy.items():
+                # token, side, role = key
+                relx = [t - base_ws_s for t in mx]
+                x2, y2 = _nanfilter(relx, list(my))
+                sc = scat.get(key)
+                if sc is None:
+                    continue
+                if x2:
+                    sc.set_offsets(np.column_stack([x2, y2]))
                 else:
-                    scat_buy.set_offsets(np.empty((0, 2)))
-
-            if scat_sell is not None:
-                if sx:
-                    scat_sell.set_offsets(np.column_stack([sx, sy]))
-                else:
-                    scat_sell.set_offsets(np.empty((0, 2)))
+                    sc.set_offsets(np.empty((0, 2)))
 
             # Row 1
             x, y = _nanfilter(xs, list(yes_mid)); l_yes.set_data(x, y)
