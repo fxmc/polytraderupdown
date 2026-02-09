@@ -283,7 +283,7 @@ async def chain_marker_task(
     *,
     wallet: str,
     mode: str = "ankr",  # "ankr" | "polygon"
-    poll_s: float = 5.0,
+    poll_s: float = 1.0,
     lookback_blocks: int = 50,
     max_block_span: int = 500,
     start_block: Optional[int] = None,
@@ -295,8 +295,8 @@ async def chain_marker_task(
     topic0 = keccak256_text(ORDERFILLED_SIG).lower()
 
     # Keep a small, stable distance behind head (avoid querying unstable head).
-    FINALITY = 32
-    START_WARMUP = 5  # start near-live immediately, not a big backfill
+    FINALITY = 1
+    START_WARMUP = 2  # start near-live immediately, not a big backfill
 
     head = await asyncio.to_thread(eth_block_number, rpc_url)
     if start_block is None:
