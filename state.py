@@ -379,6 +379,7 @@ class AppState:
     clob_tx: TxMatchStore = field(default_factory=lambda: TxMatchStore(ttl_ms=30 * 60_000, max_items=20_000))
     clob_chain_lag: LagEstimator = field(default_factory=lambda: LagEstimator(alpha=0.02, clip_ms=30_000, min_samples=10))
 
+
 def burst_badge(level: int) -> str:
     """Return a small badge indicating burst intensity."""
     if level <= 0:

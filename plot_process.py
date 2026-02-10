@@ -121,27 +121,12 @@ def plot_process_main(q, ctl_q=None, *, maxlen=1800):
         SIDES = ("BUY", "SELL")
         ROLES = ("MAKER", "TAKER")
 
-        def _learn_token(tokid: int) -> str:
-            """
-            Best-effort mapping when no explicit env override is set.
-            We default FIRST-seen token_id to NO (keeps your current blue/orange),
-            and SECOND distinct token_id to YES.
-            """
-            if tokid in tokid_to_token:
-                return tokid_to_token[tokid]
+        # Strict token resolver: NO guessing. We only trust PlotCtl/env mapping.
+        def _resolve_token(tokid: int) -> str | None:
+            return tokid_to_token.get(tokid)
 
-            # If already have both, default to NO for unknowns
-            vals = set(tokid_to_token.values())
-            if "YES" in vals and "NO" in vals:
-                tokid_to_token[tokid] = "NO"
-                return "NO"
-
-            # Assign next free slot, with NO first (preserves old look)
-            if "NO" not in vals:
-                tokid_to_token[tokid] = "NO"
-                return "NO"
-            tokid_to_token[tokid] = "YES"
-            return "YES"
+        # Buffer markers until we know mapping (startup / right-after-roll).
+        pending_markers: deque[PlotMarker] = deque(maxlen=2000)
 
         # Per-group deques
         mxy: dict[tuple[str, str, str], tuple[deque[float], deque[float]]] = {}
@@ -173,7 +158,7 @@ def plot_process_main(q, ctl_q=None, *, maxlen=1800):
         )
 
         # Leave room on the right for the Row 1 legend, and on top for the header.
-        fig.subplots_adjust(right=0.80, top=0.92)
+        fig.subplots_adjust(left=0.045, right=0.90, bottom=0.04, top=0.955, hspace=0.05, wspace=0.14)
 
         # Row 1 (spans both columns)
         ax1 = fig.add_subplot(gs[0, :])
@@ -230,30 +215,25 @@ def plot_process_main(q, ctl_q=None, *, maxlen=1800):
                         )
 
         ax1.set_ylim(-0.02, 1.02)
-        ax1.legend(
-            loc="center left",
-            bbox_to_anchor=(1.02, 0.5),
-            frameon=False,
-        )
+        ax1.legend(loc="center left", bbox_to_anchor=(1.01, 0.5), frameon=False)
         ax1.set_ylabel("prob")
 
-        # Row 2 (NEW): Trader inventory (shares) + $ exposure (net outflow)
-        (l_inv_yes,) = ax2L.plot([], [], lw=1, label="YES pos")
-        (l_inv_no,) = ax2L.plot([], [], lw=1, label="NO pos")
+        # Row 2 (NEW): Trader inventory (shares) + $ exposure (net outflow) as STEP plots
+        (l_inv_yes,) = ax2L.step([], [], where="post", lw=1, label="YES pos")
+        (l_inv_no,) = ax2L.step([], [], where="post", lw=1, label="NO pos")
         ax2L.set_ylabel("shares")
-        ax2L.legend(loc="upper left", frameon=False)
+        ax2L.legend(loc="upper left", bbox_to_anchor=(1.01, 0.5), frameon=False)
 
-        (l_exp_yes,) = ax2R.plot([], [], lw=1, label="YES $ out")
-        (l_exp_no,) = ax2R.plot([], [], lw=1, label="NO $ out")
+        (l_exp_yes,) = ax2R.step([], [], where="post", lw=1, label="YES $ out")
+        (l_exp_no,) = ax2R.step([], [], where="post", lw=1, label="NO $ out")
         ax2R.set_ylabel("$")
-        ax2R.legend(loc="upper left", frameon=False)
+        ax2R.legend(loc="upper left", bbox_to_anchor=(1.01, 0.5), frameon=False)
 
         # Row 2: Binance price + strike
         (l_px,) = ax3.plot([], [], lw=1, label="Binance px")
         (l_k,) = ax3.plot([], [], lw=1, linestyle=":", alpha=0.8, label="Strike")
         ax3.legend(
-            loc="center left",
-            bbox_to_anchor=(1.02, 0.5),
+            loc="center left", bbox_to_anchor=(1.01, 0.5),
             frameon=False,
         )
         ax3.set_ylabel("px")
@@ -285,12 +265,14 @@ def plot_process_main(q, ctl_q=None, *, maxlen=1800):
         ax4b.set_ylim(-10, 10)
 
         ax5.legend(
-            loc="center left",
-            bbox_to_anchor=(1.02, 0.5),
+            loc="center left", bbox_to_anchor=(1.01, 0.5),
             frameon=False,
         )
         ax5.set_ylabel("edge")
         ax5.set_xlabel("t (s)")
+
+        for ax in (ax1, ax2L, ax2R, ax3, ax4):
+            ax.tick_params(labelbottom=False)
 
         fig.canvas.manager.set_window_title("Polymarket 15m monitor")
 
@@ -298,6 +280,7 @@ def plot_process_main(q, ctl_q=None, *, maxlen=1800):
         last_ws = 0.0     # ms
 
         def _clear_all():
+            pending_markers.clear()
             ts.clear()
             yes_mid.clear()
             no_mid.clear()
@@ -390,6 +373,57 @@ def plot_process_main(q, ctl_q=None, *, maxlen=1800):
             got = False
             got_marker = False
 
+            # If mapping is now known, process buffered markers first (in-order).
+            if pending_markers:
+                have_yes = ("YES" in tokid_to_token.values())
+                have_no  = ("NO"  in tokid_to_token.values())
+                if have_yes and have_no:
+                    buffered = list(pending_markers)
+                    pending_markers.clear()
+                    # Process them by pushing back into the local loop via a small list
+                    # (no IPC writes).
+                    for mk in buffered:
+                        try:
+                            # emulate as if they came from q
+                            snap = mk
+                            side = (getattr(snap, "side", "") or "").upper()
+                            role = (getattr(snap, "role", "") or "").upper()
+                            if side not in ("BUY", "SELL"):
+                                continue
+                            if role not in ("MAKER", "TAKER"):
+                                continue
+                            tokid = int(getattr(snap, "token_id", -1) or -1)
+                            token = _resolve_token(tokid)
+
+                            if token is None:
+                                # should not happen if have_yes+have_no, but keep safe
+                                pending_markers.append(snap)
+                                continue
+
+                            got_marker = True
+                            mx, my = mxy[(token, side, role)]
+                            mx.append(float(snap.ts_s))
+                            my.append(float(snap.y))
+
+                            px = float(snap.price) if getattr(snap, "price", None) is not None else float(snap.y)
+                            sz = float(getattr(snap, "size", 0.0) or 0.0)
+                            if sz > 0.0 and math.isfinite(px):
+                                if side == "BUY":
+                                    pos[token] += sz
+                                    cash[token] += sz * px
+                                    buy_qty[token] += sz
+                                    buy_notional[token] += sz * px
+                                else:
+                                    pos[token] -= sz
+                                    cash[token] -= sz * px
+                                inv_ts.append(float(snap.ts_s))
+                                inv_yes.append(float(pos["YES"]))
+                                inv_no.append(float(pos["NO"]))
+                                exp_yes.append(float(cash["YES"]))
+                                exp_no.append(float(cash["NO"]))
+                        except Exception:
+                            continue
+
             while True:
                 try:
                     snap = q.get_nowait()
@@ -398,7 +432,6 @@ def plot_process_main(q, ctl_q=None, *, maxlen=1800):
 
                 # --- markers ---
                 if isinstance(snap, PlotMarker):
-                    got_marker = True
 
                     side = (getattr(snap, "side", "") or "").upper()
                     role = (getattr(snap, "role", "") or "").upper()
@@ -407,7 +440,16 @@ def plot_process_main(q, ctl_q=None, *, maxlen=1800):
                     if role not in ("MAKER", "TAKER"):
                         continue
 
-                    token = _learn_token(int(snap.token_id))
+                    # If mapping not known yet (startup / right after roll), buffer marker.
+                    tokid = int(getattr(snap, "token_id", -1) or -1)
+                    token = _resolve_token(tokid)
+
+                    if token is None:
+                        pending_markers.append(snap)
+                        continue
+
+                    got_marker = True
+
                     mx, my = mxy[(token, side, role)]
                     mx.append(float(snap.ts_s))
                     my.append(float(snap.y))
@@ -445,20 +487,9 @@ def plot_process_main(q, ctl_q=None, *, maxlen=1800):
                 if snap.win_start_ms > 0.0 and snap.win_start_ms != last_ws:
                     last_ws = snap.win_start_ms
                     _clear_all()
-                    tokid_to_token.clear()
-                    # re-apply env overrides after clearing
-                    try:
-                        if yes_tok_env:
-                            tokid_to_token[int(yes_tok_env)] = "YES"
-                    except Exception:
-                        pass
-                    try:
-                        if no_tok_env:
-                            tokid_to_token[int(no_tok_env)] = "NO"
-                    except Exception:
-                        pass
-                    base_ws_s = snap.win_start_ms / 1000.0
 
+                    base_ws_s = snap.win_start_ms / 1000.0
+                # Do NOT touch tokid_to_token here. Mapping is owned by PlotCtl reset
                 ts.append(snap.ts_s)
 
                 yes_mid.append(snap.yes_mid)
@@ -515,15 +546,25 @@ def plot_process_main(q, ctl_q=None, *, maxlen=1800):
             # Row 2 (NEW): inventory / exposure
             if len(inv_ts) > 0:
                 inv_xs = [t - base_ws_s for t in inv_ts]
-                x, y = _nanfilter(inv_xs, list(inv_yes))
-                l_inv_yes.set_data(x, y)
-                x, y = _nanfilter(inv_xs, list(inv_no))
-                l_inv_no.set_data(x, y)
+                now_x = float(xs[-1])  # extend to "current time"
 
-                x, y = _nanfilter(inv_xs, list(exp_yes))
+                # extend the last value so the step stays visible up to now_x
+                inv_xs2 = inv_xs + [now_x]
+
+                inv_yes2 = list(inv_yes) + [float(inv_yes[-1])]
+                inv_no2 = list(inv_no) + [float(inv_no[-1])]
+                exp_yes2 = list(exp_yes) + [float(exp_yes[-1])]
+                exp_no2 = list(exp_no) + [float(exp_no[-1])]
+
+                x, y = _nanfilter(inv_xs2, inv_yes2);
+                l_inv_yes.set_data(x, y)
+                x, y = _nanfilter(inv_xs2, inv_no2);
+                l_inv_no.set_data(x, y)
+                x, y = _nanfilter(inv_xs2, exp_yes2);
                 l_exp_yes.set_data(x, y)
-                x, y = _nanfilter(inv_xs, list(exp_no))
+                x, y = _nanfilter(inv_xs2, exp_no2);
                 l_exp_no.set_data(x, y)
+
             else:
                 l_inv_yes.set_data([], [])
                 l_inv_no.set_data([], [])
