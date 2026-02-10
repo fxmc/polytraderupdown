@@ -88,12 +88,17 @@ async def plot_sampler_task(state: AppState, plot_q) -> None:
                 ws = float(state.driver.win_start_ms)
             if state.plot_ctl_q is not None:
                 try:
+                    yid = state.book.yes_asset_id
+                    nid = state.book.no_asset_id
+
                     state.plot_ctl_q.put_nowait(
                         PlotCtl(
                             show=state.plot_ctl.show,
                             enabled=state.plot_ctl.enabled,
                             reset=True,
                             win_start_s=(ws / 1000.0) if ws > 0.0 else 0.0,
+                            yes_token_id=int(yid) if yid is not None else None,
+                            no_token_id=int(nid) if nid is not None else None,
                         )
                     )
                 except Exception:
@@ -117,12 +122,17 @@ async def plot_sampler_task(state: AppState, plot_q) -> None:
             reset_plot_buffers(state)
             if state.plot_ctl_q is not None:
                 try:
+                    yid = state.book.yes_asset_id
+                    nid = state.book.no_asset_id
+
                     state.plot_ctl_q.put_nowait(
                         PlotCtl(
                             show=ctl.show,
                             enabled=ctl.enabled,
                             reset=True,
-                            win_start_s=ws / 1000.0
+                            win_start_s=ws / 1000.0,
+                            yes_token_id=int(yid) if yid is not None else None,
+                            no_token_id=int(nid) if nid is not None else None,
                         )
                     )
                 except Exception:

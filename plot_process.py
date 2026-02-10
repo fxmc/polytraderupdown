@@ -12,6 +12,8 @@ import os
 from collections import deque
 from plot_ipc import PlotSnap, PlotCtl, PlotMarker
 from pathlib import Path
+from bisect import insort
+
 
 
 def _nanfilter(xs, ys):
@@ -89,17 +91,11 @@ def plot_process_main(q, ctl_q=None, *, maxlen=1800):
         fv_gap_nd = deque(maxlen=maxlen)
         mid_micro_gap = deque(maxlen=maxlen)
 
-        # Row 2 (NEW): running trader ledger (computed ONLY from PlotMarker)
-        inv_ts = deque(maxlen=maxlen)
-        inv_yes = deque(maxlen=maxlen)
-        inv_no = deque(maxlen=maxlen)
-        exp_yes = deque(maxlen=maxlen)
-        exp_no = deque(maxlen=maxlen)
-
         pos = {"YES": 0.0, "NO": 0.0}
         cash = {"YES": 0.0, "NO": 0.0}  # net $ outflow (BUY +, SELL -)
         buy_qty = {"YES": 0.0, "NO": 0.0}
         buy_notional = {"YES": 0.0, "NO": 0.0}
+        ledger_events: list[tuple[float, str, str, float, float]] = []
 
         # --- markers (YES/NO × BUY/SELL × MAKER/TAKER) ---
         # Token-id -> {"YES","NO"} mapping (optional exact override via env vars)
@@ -222,11 +218,11 @@ def plot_process_main(q, ctl_q=None, *, maxlen=1800):
         (l_inv_yes,) = ax2L.step([], [], where="post", lw=1, label="YES pos")
         (l_inv_no,) = ax2L.step([], [], where="post", lw=1, label="NO pos")
         ax2L.set_ylabel("shares")
-        ax2L.legend(loc="upper left", bbox_to_anchor=(1.01, 0.5), frameon=False)
+        # ax2L.legend(loc="upper left", bbox_to_anchor=(1.01, 0.5), frameon=False)
 
-        (l_exp_yes,) = ax2R.step([], [], where="post", lw=1, label="YES $ out")
-        (l_exp_no,) = ax2R.step([], [], where="post", lw=1, label="NO $ out")
-        ax2R.set_ylabel("$")
+        (l_exp_yes,) = ax2R.step([], [], where="post", lw=1, label="YES")
+        (l_exp_no,) = ax2R.step([], [], where="post", lw=1, label="NO")
+        ax2R.set_ylabel("USD Exposure")
         ax2R.legend(loc="upper left", bbox_to_anchor=(1.01, 0.5), frameon=False)
 
         # Row 2: Binance price + strike
@@ -281,6 +277,8 @@ def plot_process_main(q, ctl_q=None, *, maxlen=1800):
 
         def _clear_all():
             pending_markers.clear()
+            ledger_events.clear()
+
             ts.clear()
             yes_mid.clear()
             no_mid.clear()
@@ -309,12 +307,6 @@ def plot_process_main(q, ctl_q=None, *, maxlen=1800):
 
             fv_gap_nd.clear()
             mid_micro_gap.clear()
-
-            inv_ts.clear()
-            inv_yes.clear()
-            inv_no.clear()
-            exp_yes.clear()
-            exp_no.clear()
 
             pos["YES"] = pos["NO"] = 0.0
             cash["YES"] = cash["NO"] = 0.0
@@ -348,12 +340,14 @@ def plot_process_main(q, ctl_q=None, *, maxlen=1800):
 
                             if getattr(ctl, "reset", False):
                                 _clear_all()
-                                # reset the token-id mapping across market rolls
-                                tokid_to_token.clear()
-                                if yid is not None:
-                                    tokid_to_token[int(yid)] = "YES"
-                                if nid is not None:
-                                    tokid_to_token[int(nid)] = "NO"
+
+                                # Only reset mapping if we were actually given fresh ids.
+                                if (yid is not None) or (nid is not None):
+                                    tokid_to_token.clear()
+                                    if yid is not None:
+                                        tokid_to_token[int(yid)] = "YES"
+                                    if nid is not None:
+                                        tokid_to_token[int(nid)] = "NO"
                                 if getattr(ctl, "win_start_s", 0.0) > 0.0:
                                     base_ws_s = float(ctl.win_start_s)
                             else:
@@ -408,19 +402,10 @@ def plot_process_main(q, ctl_q=None, *, maxlen=1800):
                             px = float(snap.price) if getattr(snap, "price", None) is not None else float(snap.y)
                             sz = float(getattr(snap, "size", 0.0) or 0.0)
                             if sz > 0.0 and math.isfinite(px):
-                                if side == "BUY":
-                                    pos[token] += sz
-                                    cash[token] += sz * px
-                                    buy_qty[token] += sz
-                                    buy_notional[token] += sz * px
-                                else:
-                                    pos[token] -= sz
-                                    cash[token] -= sz * px
-                                inv_ts.append(float(snap.ts_s))
-                                inv_yes.append(float(pos["YES"]))
-                                inv_no.append(float(pos["NO"]))
-                                exp_yes.append(float(cash["YES"]))
-                                exp_no.append(float(cash["NO"]))
+                                insort(ledger_events, (float(snap.ts_s), token, side, float(sz), float(px)))
+                                if len(ledger_events) > maxlen:
+                                    del ledger_events[:-maxlen]
+
                         except Exception:
                             continue
 
@@ -454,25 +439,13 @@ def plot_process_main(q, ctl_q=None, *, maxlen=1800):
                     mx.append(float(snap.ts_s))
                     my.append(float(snap.y))
 
-                    # --- running trader ledger (inventory / $ exposure) ---
                     px = float(snap.price) if getattr(snap, "price", None) is not None else float(snap.y)
                     sz = float(getattr(snap, "size", 0.0) or 0.0)
 
                     if sz > 0.0 and math.isfinite(px):
-                        if side == "BUY":
-                            pos[token] += sz
-                            cash[token] += sz * px
-                            buy_qty[token] += sz
-                            buy_notional[token] += sz * px
-                        else:  # SELL
-                            pos[token] -= sz
-                            cash[token] -= sz * px
-
-                        inv_ts.append(float(snap.ts_s))
-                        inv_yes.append(float(pos["YES"]))
-                        inv_no.append(float(pos["NO"]))
-                        exp_yes.append(float(cash["YES"]))
-                        exp_no.append(float(cash["NO"]))
+                        insort(ledger_events, (float(snap.ts_s), token, side, float(sz), float(px)))
+                        if len(ledger_events) > maxlen:
+                            del ledger_events[:-maxlen]
 
                     # IMPORTANT: PlotMarker must not fall through into PlotSnap handling
                     continue
@@ -544,32 +517,78 @@ def plot_process_main(q, ctl_q=None, *, maxlen=1800):
                     sc.set_offsets(np.empty((0, 2)))
 
             # Row 2 (NEW): inventory / exposure
-            if len(inv_ts) > 0:
-                inv_xs = [t - base_ws_s for t in inv_ts]
-                now_x = float(xs[-1])  # extend to "current time"
+            if ledger_events:
+                p_yes = p_no = 0.0
+                c_yes = c_no = 0.0
+                bq_yes = bq_no = 0.0
+                bn_yes = bn_no = 0.0
 
-                # extend the last value so the step stays visible up to now_x
-                inv_xs2 = inv_xs + [now_x]
+                xs_led = []
+                yes_pos = []
+                no_pos = []
+                yes_out = []
+                no_out = []
 
-                inv_yes2 = list(inv_yes) + [float(inv_yes[-1])]
-                inv_no2 = list(inv_no) + [float(inv_no[-1])]
-                exp_yes2 = list(exp_yes) + [float(exp_yes[-1])]
-                exp_no2 = list(exp_no) + [float(exp_no[-1])]
+                for t, tok, sd, sz, px in ledger_events:
+                    if sd == "BUY":
+                        if tok == "YES":
+                            p_yes += sz;
+                            c_yes += sz * px;
+                            bq_yes += sz;
+                            bn_yes += sz * px
+                        else:
+                            p_no += sz;
+                            c_no += sz * px;
+                            bq_no += sz;
+                            bn_no += sz * px
+                    else:  # SELL
+                        if tok == "YES":
+                            p_yes -= sz;
+                            c_yes -= sz * px
+                        else:
+                            p_no -= sz;
+                            c_no -= sz * px
 
-                x, y = _nanfilter(inv_xs2, inv_yes2);
+                    xs_led.append(t - base_ws_s)
+                    yes_pos.append(p_yes)
+                    no_pos.append(p_no)
+                    yes_out.append(c_yes)
+                    no_out.append(c_no)
+
+                # extend last point to current time so step stays visible
+                now_x = float(xs[-1])
+                xs2 = xs_led + [now_x]
+
+                yes_pos2 = yes_pos + [yes_pos[-1]]
+                no_pos2 = no_pos + [no_pos[-1]]
+                yes_out2 = yes_out + [yes_out[-1]]
+                no_out2 = no_out + [no_out[-1]]
+
+                x, y = _nanfilter(xs2, yes_pos2);
                 l_inv_yes.set_data(x, y)
-                x, y = _nanfilter(inv_xs2, inv_no2);
+                x, y = _nanfilter(xs2, no_pos2);
                 l_inv_no.set_data(x, y)
-                x, y = _nanfilter(inv_xs2, exp_yes2);
+                x, y = _nanfilter(xs2, yes_out2);
                 l_exp_yes.set_data(x, y)
-                x, y = _nanfilter(inv_xs2, exp_no2);
+                x, y = _nanfilter(xs2, no_out2);
                 l_exp_no.set_data(x, y)
+
+                # update summary stats sources for header
+                pos["YES"], pos["NO"] = p_yes, p_no
+                cash["YES"], cash["NO"] = c_yes, c_no
+                buy_qty["YES"], buy_qty["NO"] = bq_yes, bq_no
+                buy_notional["YES"], buy_notional["NO"] = bn_yes, bn_no
 
             else:
                 l_inv_yes.set_data([], [])
                 l_inv_no.set_data([], [])
                 l_exp_yes.set_data([], [])
                 l_exp_no.set_data([], [])
+
+                pos["YES"] = pos["NO"] = 0.0
+                cash["YES"] = cash["NO"] = 0.0
+                buy_qty["YES"] = buy_qty["NO"] = 0.0
+                buy_notional["YES"] = buy_notional["NO"] = 0.0
 
             # Header stats (PnL, avg buy, scenario PnL). Updated live.
             try:
@@ -586,10 +605,20 @@ def plot_process_main(q, ctl_q=None, *, maxlen=1800):
                 pnl_if_yes = (pos["YES"] * 1.0) - net_spent
                 pnl_if_no  = (pos["NO"]  * 1.0) - net_spent
 
+                yes_sh = float(pos["YES"])
+                no_sh = float(pos["NO"])
+                yes_usd = float(cash["YES"])
+                no_usd = float(cash["NO"])
+
                 hdr.set_text(
-                    f"PnL(MTM): ${pnl_mtm:,.2f} | Avg YES: {avg_yes:.4f}  Avg NO: {avg_no:.4f} | "
-                    f"If YES: ${pnl_if_yes:,.2f}  If NO: ${pnl_if_no:,.2f}  | Markers: hollow=MAKER, filled=TAKER"
+                    f"PnL(MTM): ${pnl_mtm:,.2f} | "
+                    f"Pos YES: {yes_sh:,.0f}  NO: {no_sh:,.0f} | "
+                    f"USD YES: ${yes_usd:,.2f}  NO: ${no_usd:,.2f} | "
+                    f"Avg YES: {avg_yes:.4f}  Avg NO: {avg_no:.4f} | "
+                    f"If YES: ${pnl_if_yes:,.2f}  If NO: ${pnl_if_no:,.2f} | "
+                    f"Markers: hollow=MAKER, filled=TAKER"
                 )
+
             except Exception:
                 pass
 
