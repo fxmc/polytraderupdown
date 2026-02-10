@@ -32,6 +32,7 @@ import websockets
 import math
 
 from config import PM_CLOB_PING_EVERY_S, PM_CLOB_WS_URL
+from plot_ipc import PlotCtl
 from raw_logger import AsyncJsonlLogger
 from state import AppState, OrderbookLevel, AlignState
 from typing import Any, Dict, Iterable, List, Optional, Tuple
@@ -40,6 +41,7 @@ from config import PM_COIN_BY_BINANCE
 from resolve_polymarket_market import build_15m_slug, resolve_market_by_slug
 from maker_metrics import danger_score_bid, danger_score_ask
 from state import L1SideMetrics  # after you add it in state.py
+from tx_match import ClobTradePrint, norm_tx_hash
 
 
 # --- add to ingest_polymarket_clob.py ---
@@ -478,6 +480,59 @@ def _parse_book_msg(msg: Dict[str, Any]) -> Optional[Tuple[str, float, Any, Any]
     return (asset_id, ts_ms, bids, asks)
 
 
+def _parse_last_trade_price_msg(msg: Dict[str, Any]) -> Optional[ClobTradePrint]:
+    """Parse CLOB `last_trade_price` message into a normalized struct.
+
+    Required fields (crash-fast at parse time; caller catches and continues):
+      - transaction_hash (tx_hash join key)
+      - timestamp (CLOB ms clock)
+      - market, asset_id
+      - side, size, price, fee_rate_bps
+    """
+    if msg.get("event_type") != "last_trade_price":
+        return None
+
+    txh = msg.get("transaction_hash")
+    if not isinstance(txh, str) or not txh:
+        raise ValueError("last_trade_price missing transaction_hash")
+
+    ts_ms_f = _coerce_epoch_ms(msg.get("timestamp"))
+    if ts_ms_f <= 0.0:
+        raise ValueError("last_trade_price missing/invalid timestamp")
+
+    market = msg.get("market")
+    asset_id = msg.get("asset_id")
+    side = msg.get("side")
+    size = msg.get("size")
+    price = msg.get("price")
+    fee_rate_bps = msg.get("fee_rate_bps")
+
+    # Keep these as strings to avoid Python int precision / float parsing surprises.
+    for k, v in [
+        ("market", market),
+        ("asset_id", asset_id),
+        ("side", side),
+        ("size", size),
+        ("price", price),
+        ("fee_rate_bps", fee_rate_bps),
+    ]:
+        if not isinstance(v, str) or not v:
+            raise ValueError(f"last_trade_price missing {k}")
+
+    return ClobTradePrint(
+        tx_hash=norm_tx_hash(txh),
+        ts_clob_ms=int(ts_ms_f),
+        ts_local_ms=int(_now_ms()),
+        market=str(market),
+        asset_id=str(asset_id),
+        side=str(side),
+        size=str(size),
+        price=str(price),
+        fee_rate_bps=str(fee_rate_bps),
+        slug="",  # filled by caller from state context
+    )
+
+
 def _apply_book_snapshot(
     state: AppState,
     *,
@@ -609,67 +664,108 @@ async def polymarket_clob_task(
                             continue
 
                         for msg in _iter_messages(msg0):
+                            # --- 1) Book snapshots (existing path) ---
                             parsed = _parse_book_msg(msg)
-                            if parsed is None:
+                            if parsed is not None:
+                                asset_id, event_ms, bids, asks = parsed
+                                _apply_book_snapshot(
+                                    state,
+                                    asset_id=asset_id,
+                                    bids=bids,
+                                    asks=asks,
+                                    yes_asset_id=yes_asset_id,
+                                    no_asset_id=no_asset_id,
+                                    max_levels=max_levels,
+                                    recv_ms=recv_ms,
+                                    event_ms=event_ms,
+                                )
+
+                                # Minimal semantic logging (no full depth).
+                                yb0 = state.book.yes_bids[0].px if state.book.yes_bids else None
+                                ya0 = state.book.yes_asks[0].px if state.book.yes_asks else None
+                                nb0 = state.book.no_bids[0].px if state.book.no_bids else None
+                                na0 = state.book.no_asks[0].px if state.book.no_asks else None
+
+                                # boundary placeholders -> missing
+                                if ya0 is not None and ya0 >= 1.0: ya0 = None
+                                if na0 is not None and na0 >= 1.0: na0 = None
+                                if yb0 is not None and yb0 <= 0.0: yb0 = None
+                                if nb0 is not None and nb0 <= 0.0: nb0 = None
+
+                                is_two_sided = (yb0 is not None) and (ya0 is not None)
+                                is_one_sided = not is_two_sided
+                                has_book = (yb0 is not None) or (ya0 is not None) or (nb0 is not None) or (na0 is not None)
+                                is_pinned = ((yb0 is not None and yb0 >= 0.99 and ya0 is None) or
+                                             (na0 is not None and na0 <= 0.01 and nb0 is None))
+
+                                no_trade_zone = (not has_book) or (not is_two_sided) or is_pinned
+
+                                logger.log(
+                                    {
+                                        "ts_local_ms": recv_ms,
+                                        "source": "polymarket_clob",
+                                        "type": "book",
+                                        "market_slug": state.book.market_slug,
+                                        "market_id": state.book.market_id,
+                                        "asset_id": asset_id,
+                                        "event_ms": event_ms,
+                                        "lag_raw_ms": (recv_ms - event_ms) if event_ms > 0.0 else None,
+                                        "lag_ms": max(0.0, recv_ms - event_ms - state.diag.clock_offset_ms) if event_ms > 0.0 else None,
+                                        "l1": {
+                                            "yes_bid": yb0,
+                                            "yes_ask": ya0,
+                                            "no_bid": nb0,
+                                            "no_ask": na0,
+                                        },
+                                        "regime": {
+                                            "is_two_sided": is_two_sided,
+                                            "is_one_sided": is_one_sided,
+                                            "is_pinned": is_pinned,
+                                            "no_trade_zone": no_trade_zone,
+                                        },
+                                        "updates": state.book.updates,
+                                    }
+                                )
                                 continue
 
-                            asset_id, event_ms, bids, asks = parsed
-                            _apply_book_snapshot(
-                                state,
-                                asset_id=asset_id,
-                                bids=bids,
-                                asks=asks,
-                                yes_asset_id=yes_asset_id,
-                                no_asset_id=no_asset_id,
-                                max_levels=max_levels,
-                                recv_ms=recv_ms,
-                                event_ms=event_ms,
-                            )
+                            # --- 2) last_trade_price prints (NEW path) ---
+                            try:
+                                p = _parse_last_trade_price_msg(msg)
+                            except Exception as e:
+                                logger.log(
+                                    {
+                                        "ts_local_ms": recv_ms,
+                                        "source": "polymarket_clob",
+                                        "type": "last_trade_price_parse_error",
+                                        "market_slug": state.book.market_slug,
+                                        "error": repr(e),
+                                        "msg_keys": sorted(list(msg.keys())) if isinstance(msg, dict) else None,
+                                    }
+                                )
+                                continue
 
-                            # Minimal semantic logging (no full depth).
-                            yb0 = state.book.yes_bids[0].px if state.book.yes_bids else None
-                            ya0 = state.book.yes_asks[0].px if state.book.yes_asks else None
-                            nb0 = state.book.no_bids[0].px if state.book.no_bids else None
-                            na0 = state.book.no_asks[0].px if state.book.no_asks else None
+                            if p is None:
+                                continue
 
-                            # boundary placeholders -> missing
-                            if ya0 is not None and ya0 >= 1.0: ya0 = None
-                            if na0 is not None and na0 >= 1.0: na0 = None
-                            if yb0 is not None and yb0 <= 0.0: yb0 = None
-                            if nb0 is not None and nb0 <= 0.0: nb0 = None
+                            # Fill slug context + insert into bounded in-memory store.
+                            p.slug = str(state.book.market_slug or "")
+                            state.clob_tx.put(p)
 
-                            is_two_sided = (yb0 is not None) and (ya0 is not None)
-                            is_one_sided = not is_two_sided
-                            has_book = (yb0 is not None) or (ya0 is not None) or (nb0 is not None) or (na0 is not None)
-                            is_pinned = ((yb0 is not None and yb0 >= 0.99 and ya0 is None) or
-                                         (na0 is not None and na0 <= 0.01 and nb0 is None))
-
-                            no_trade_zone = (not has_book) or (not is_two_sided) or is_pinned  # you can extend later with lag spikes etc.
-
+                            # Dedicated log file via MultiSourceJsonlLogger (source routing).
                             logger.log(
                                 {
-                                    "ts_local_ms": recv_ms,
-                                    "source": "polymarket_clob",
-                                    "type": "book",
-                                    "market_slug": state.book.market_slug,
-                                    "market_id": state.book.market_id,
-                                    "asset_id": asset_id,
-                                    "event_ms": event_ms,
-                                    "lag_raw_ms": (recv_ms - event_ms) if event_ms > 0.0 else None,
-                                    "lag_ms": max(0.0, recv_ms - event_ms - state.diag.clock_offset_ms) if event_ms > 0.0 else None,
-                                    "l1": {
-                                        "yes_bid": yb0,
-                                        "yes_ask": ya0,
-                                        "no_bid": nb0,
-                                        "no_ask": na0,
-                                    },
-                                    "regime": {
-                                        "is_two_sided": is_two_sided,
-                                        "is_one_sided": is_one_sided,
-                                        "is_pinned": is_pinned,
-                                        "no_trade_zone": no_trade_zone,
-                                    },
-                                    "updates": state.book.updates,
+                                    "ts_local_ms": float(p.ts_local_ms),
+                                    "source": "polymarket_last_trade_price",
+                                    "type": "last_trade_price",
+                                    "slug": p.slug,
+                                    "ts_clob_ms": int(p.ts_clob_ms),
+                                    "tx_hash": p.tx_hash,
+                                    "market": p.market,
+                                    "asset_id": p.asset_id,
+                                    "side": p.side,
+                                    "size": p.size,
+                                    "price": p.price,
+                                    "fee_rate_bps": p.fee_rate_bps,
                                 }
                             )
 

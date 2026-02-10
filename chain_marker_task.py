@@ -34,11 +34,20 @@ ORDERFILLED_SIG = "OrderFilled(bytes32,address,address,uint256,uint256,uint256,u
 ERC20_TRANSFER_SIG = "Transfer(address,address,uint256)"
 
 _dbg_path = Path("chain_marker.debug.jsonl")
+_match_dbg_path = Path("chain_clob_match.debug.jsonl")
 
 
 def _dbg_log(obj: dict) -> None:
     try:
         with _dbg_path.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(obj, ensure_ascii=False) + "\n")
+    except Exception:
+        pass
+
+
+def _match_dbg_log(obj: dict) -> None:
+    try:
+        with _match_dbg_path.open("a", encoding="utf-8") as f:
             f.write(json.dumps(obj, ensure_ascii=False) + "\n")
     except Exception:
         pass
@@ -394,6 +403,8 @@ async def chain_marker_task(
                     ts_s = float(await asyncio.to_thread(block_ts_s_from_block, rpc_url, bn))
                     block_ts_cache[bn] = ts_s
 
+                ts_chain_ms = int(float(ts_s) * 1000.0)
+
                 txh = (lg.get("transactionHash") or "").lower()
                 li = int(lg.get("logIndex") or "0x0", 16)
                 if not txh:
@@ -443,8 +454,53 @@ async def chain_marker_task(
                     # keep side_old on any failure
                     pass
 
+                # --- NEW: try exact tx_hash match to CLOB `last_trade_price` for precise timestamp ---
+                ts_clob_ms: Optional[int] = None
+                lag_ms: Optional[int] = None
+                matched: bool = False
+                reason: str = ""
+
+                try:
+                    p = state.clob_tx.get(txh)
+                    if p is not None:
+                        ts_clob_ms = int(p.ts_clob_ms)
+                        lag_ms = int(ts_clob_ms - ts_chain_ms)
+                        state.clob_chain_lag.update(float(lag_ms))
+                        matched = True
+                    else:
+                        reason = "no_clob_print"
+                except Exception as e:
+                    reason = f"clob_lookup_error:{type(e).__name__}"
+
+                lag_est_ms = float(state.clob_chain_lag.estimate())
+                use_ms = int(ts_clob_ms) if matched and ts_clob_ms is not None else int(ts_chain_ms + lag_est_ms)
+
+                # Dedicated match/fallback logging.
+                _match_dbg_log(
+                    {
+                        "type": "chain_clob_match",
+                        "ts_local_ms": int(time.time() * 1000),
+                        "tx_hash": txh,
+                        "block_number": bn,
+                        "ts_chain_ms": ts_chain_ms,
+                        "ts_clob_ms": ts_clob_ms,
+                        "use_ms": use_ms,
+                        "matched": matched,
+                        "reason": reason,
+                        "lag_ms": lag_ms,
+                        "lag_est_ms": lag_est_ms,
+                        "disp_ms": float(state.clob_chain_lag.dispersion()),
+                        "n": int(state.clob_chain_lag.n),
+                        "token_id": int(token_id),
+                        "role": role,
+                        "side": side_final,
+                        "size": float(size),
+                        "price": float(price),
+                    }
+                )
+
                 m = PlotMarker(
-                    ts_s=float(ts_s),
+                    ts_s=float(use_ms) / 1000.0,
                     win_start_ms=float(ws_ms),
                     y=float(price),
                     token_id=int(token_id),

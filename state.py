@@ -10,6 +10,7 @@ from dataclasses import dataclass, field
 from typing import Deque, List, Any
 from momentum import SecPriceBuffer
 from mom_zscore import MomentumZConfig, MomentumZTracker
+from tx_match import TxMatchStore, LagEstimator
 
 BURST_ALPHA: float = 0.15
 BURST_ON_RPS: float = 280.0
@@ -373,7 +374,10 @@ class AppState:
     plot_ctl: PlotControlState = field(default_factory=PlotControlState)
     plot_ctl_q: Any = None
     mom: MomentumState = field(default_factory=MomentumState)
-
+    # --- CLOB↔CHAIN time alignment state ---
+    # Populated by ingest_polymarket_clob (last_trade_price) and consumed by chain_marker_task.
+    clob_tx: TxMatchStore = field(default_factory=lambda: TxMatchStore(ttl_ms=30 * 60_000, max_items=20_000))
+    clob_chain_lag: LagEstimator = field(default_factory=lambda: LagEstimator(alpha=0.02, clip_ms=30_000, min_samples=10))
 
 def burst_badge(level: int) -> str:
     """Return a small badge indicating burst intensity."""
