@@ -141,6 +141,7 @@ def plot_process_main(q, ctl_q=None, *, maxlen=1800):
 
         enabled = True
         show = True
+        current_question: str = ""
 
         # --- figure with 4 rows ---
         plt.ion()
@@ -154,7 +155,7 @@ def plot_process_main(q, ctl_q=None, *, maxlen=1800):
         )
 
         # Leave room on the right for the Row 1 legend, and on top for the header.
-        fig.subplots_adjust(left=0.045, right=0.90, bottom=0.04, top=0.955, hspace=0.05, wspace=0.14)
+        fig.subplots_adjust(left=0.045, right=0.90, bottom=0.04, top=0.94, hspace=0.05, wspace=0.14)
 
         # Row 1 (spans both columns)
         ax1 = fig.add_subplot(gs[0, :])
@@ -333,6 +334,10 @@ def plot_process_main(q, ctl_q=None, *, maxlen=1800):
                         if isinstance(ctl, PlotCtl):
                             show = ctl.show
                             enabled = ctl.enabled
+
+                            mq = getattr(ctl, "market_question", None)
+                            if isinstance(mq, str) and mq.strip():
+                                current_question = mq.strip()
 
                             # NEW: deterministic YES/NO token mapping (and clear old mapping on reset)
                             yid = getattr(ctl, "yes_token_id", None)
@@ -610,14 +615,21 @@ def plot_process_main(q, ctl_q=None, *, maxlen=1800):
                 yes_usd = float(cash["YES"])
                 no_usd = float(cash["NO"])
 
-                hdr.set_text(
+                stats_line = (
                     f"PnL(MTM): ${pnl_mtm:,.2f} | "
-                    f"Pos YES: {yes_sh:,.0f}  NO: {no_sh:,.0f} | "
-                    f"USD YES: ${yes_usd:,.2f}  NO: ${no_usd:,.2f} | "
+                    f"Pos YES/NO: {pos['YES']:.0f}/{pos['NO']:.0f} | "
+                    f"$ YES/NO: {cash['YES']:,.0f}/{cash['NO']:,.0f} | "
                     f"Avg YES: {avg_yes:.4f}  Avg NO: {avg_no:.4f} | "
-                    f"If YES: ${pnl_if_yes:,.2f}  If NO: ${pnl_if_no:,.2f} | "
+                    f"If YES: ${pnl_if_yes:,.2f}  If NO: ${pnl_if_no:,.2f}  | "
                     f"Markers: hollow=MAKER, filled=TAKER"
                 )
+
+                # IMPORTANT: escape $ to avoid mathtext (which italicizes text)
+                stats_line = stats_line.replace("$", r"\$")
+                if current_question:
+                    hdr.set_text(f"{current_question}\n{stats_line}")
+                else:
+                    hdr.set_text(stats_line)
 
             except Exception:
                 pass

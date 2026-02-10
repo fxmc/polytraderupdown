@@ -52,6 +52,9 @@ class PlotCtl:
     reset: bool = False
     win_start_s: float = 0.0   # <-- must be win_start_s (lowercase s)
 
+    # NEW: market title/question for header (plot process has no access to AppState)
+    market_question: Optional[str] = None
+
     # NEW: deterministic YES/NO token mapping for markers
     yes_token_id: Optional[int] = None
     no_token_id: Optional[int] = None

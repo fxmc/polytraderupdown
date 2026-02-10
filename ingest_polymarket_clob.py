@@ -913,6 +913,7 @@ async def polymarket_clob_autoresolve_task(
                                     enabled=True,
                                     reset=True,
                                     win_start_s=float(bucket_start_ms) / 1000.0,
+                                    market_question=str(meta.question) if getattr(meta, "question", None) is not None else None,
                                     yes_token_id=int(meta.yes_asset_id),
                                     no_token_id=int(meta.no_asset_id),
                                 )
