@@ -5,6 +5,7 @@ import asyncio
 import json
 import os
 import time
+from collections import deque
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 
@@ -35,6 +36,63 @@ ERC20_TRANSFER_SIG = "Transfer(address,address,uint256)"
 
 _dbg_path = Path("chain_marker.debug.jsonl")
 _match_dbg_path = Path("chain_clob_match.debug.jsonl")
+
+
+_tracked_fills_path = Path("tracked_trader_fills.jsonl")
+
+_TRACKED_REQUIRED = {
+    "type",
+    "ts_local_ms",
+    "ts_s",
+    "tx_hash",
+    "block_number",
+    "token_id",
+    "side",
+    "role",
+    "size",
+    "price",
+    "ts_chain_ms",
+    "ts_clob_ms",
+    "matched",
+    "lag_ms",
+    "lag_est_ms",
+}
+
+
+def _write_tracked_fill(obj: dict) -> None:
+    """
+    Crash-fast, schema-stable JSONL log of the *exact* fills we emit as PlotMarker.
+    One line per tracked fill.
+    """
+    missing = [k for k in _TRACKED_REQUIRED if k not in obj]
+    if missing:
+        raise RuntimeError(f"tracked_trader_fills missing keys: {missing}")
+
+    if obj.get("type") != "tracked_fill":
+        raise RuntimeError(f"tracked_trader_fills bad type: {obj.get('type')}")
+
+    # Coerce/validate a few critical types (leave rest as-is).
+    obj["ts_local_ms"] = int(obj["ts_local_ms"])
+    obj["ts_s"] = float(obj["ts_s"])
+    obj["block_number"] = int(obj["block_number"])
+    obj["token_id"] = int(obj["token_id"])
+    obj["size"] = float(obj["size"])
+    obj["price"] = float(obj["price"])
+    obj["ts_chain_ms"] = int(obj["ts_chain_ms"])
+    obj["ts_clob_ms"] = (int(obj["ts_clob_ms"]) if obj["ts_clob_ms"] is not None else None)
+    obj["matched"] = bool(obj["matched"])
+    obj["lag_ms"] = (int(obj["lag_ms"]) if obj["lag_ms"] is not None else None)
+    obj["lag_est_ms"] = float(obj["lag_est_ms"])
+
+    side = str(obj.get("side", "")).upper()
+    role = str(obj.get("role", "")).upper()
+    if side not in ("BUY", "SELL"):
+        raise RuntimeError(f"tracked_trader_fills bad side: {side}")
+    if role not in ("MAKER", "TAKER"):
+        raise RuntimeError(f"tracked_trader_fills bad role: {role}")
+
+    with _tracked_fills_path.open("a", encoding="utf-8") as f:
+        f.write(json.dumps(obj, ensure_ascii=False) + "\n")
 
 
 def _dbg_log(obj: dict) -> None:
@@ -283,7 +341,7 @@ def _usdc_delta_raw_from_receipt(receipt: Dict[str, Any], wallet: str) -> Option
         except Exception:
             continue
 
-    return d if any_hit else 0
+    return d if any_hit else None
 
 
 async def chain_marker_task(
@@ -315,6 +373,7 @@ async def chain_marker_task(
         from_block = int(start_block)
 
     seen: Set[Tuple[str, int]] = set()
+    seen_q = deque(maxlen=20000)
 
     # block_number -> ts_s (int seconds since epoch)
     block_ts_cache: Dict[int, float] = {}
@@ -413,6 +472,11 @@ async def chain_marker_task(
                 if key in seen:
                     continue
                 seen.add(key)
+                seen_q.append(key)
+                if len(seen_q) == seen_q.maxlen:
+                    # when deque overwrites, pop left manually
+                    old = seen_q.popleft()
+                    seen.discard(old)
 
                 maker, taker, maker_aid, taker_aid, maker_amt, taker_amt, fee = decode_order_filled_log(lg)
                 if wallet != maker and wallet != taker:
@@ -510,6 +574,31 @@ async def chain_marker_task(
                     price=float(price),
                     tx_hash=txh,
                 )
+
+                try:
+                    # NEW: stable ledger-style fill log (mirrors what plot sees)
+                    _write_tracked_fill(
+                        {
+                            "type": "tracked_fill",
+                            "ts_local_ms": int(time.time() * 1000),
+                            "ts_s": float(m.ts_s),
+                            "tx_hash": txh,
+                            "block_number": int(bn),
+                            "token_id": int(token_id),
+                            "side": str(side_final),
+                            "role": str(role),
+                            "size": float(size),
+                            "price": float(price),
+                            "ts_chain_ms": int(ts_chain_ms),
+                            "ts_clob_ms": (int(ts_clob_ms) if ts_clob_ms is not None else None),
+                            "matched": bool(matched),
+                            "lag_ms": (int(lag_ms) if lag_ms is not None else None),
+                            "lag_est_ms": float(lag_est_ms),
+                        }
+                    )
+                except Exception as e:
+                    _dbg_log({"type": "tracked_fill_fatal", "err": str(e), "tx_hash": txh})
+                    raise
 
                 # PRESERVED debug logging, plus minimal extra fields
                 _dbg_log(

@@ -19,8 +19,17 @@ def _nanfilter(xs, ys):
     for x, y in zip(xs, ys, strict=False):
         if y is None:
             continue
-        if isinstance(y, float) and (math.isnan(y) or math.isinf(y)):
-            continue
+
+        try:
+            yf = float(y)
+            if math.isnan(yf) or math.isinf(yf):
+                continue
+            y = yf
+
+        except Exception:
+            # non-numeric y -> keep as-is (or skip; but current code keeps)
+            pass
+
         outx.append(x)
         outy.append(y)
     return outx, outy
@@ -79,6 +88,18 @@ def plot_process_main(q, ctl_q=None, *, maxlen=1800):
 
         fv_gap_nd = deque(maxlen=maxlen)
         mid_micro_gap = deque(maxlen=maxlen)
+
+        # Row 2 (NEW): running trader ledger (computed ONLY from PlotMarker)
+        inv_ts = deque(maxlen=maxlen)
+        inv_yes = deque(maxlen=maxlen)
+        inv_no = deque(maxlen=maxlen)
+        exp_yes = deque(maxlen=maxlen)
+        exp_no = deque(maxlen=maxlen)
+
+        pos = {"YES": 0.0, "NO": 0.0}
+        cash = {"YES": 0.0, "NO": 0.0}  # net $ outflow (BUY +, SELL -)
+        buy_qty = {"YES": 0.0, "NO": 0.0}
+        buy_notional = {"YES": 0.0, "NO": 0.0}
 
         # --- markers (YES/NO × BUY/SELL × MAKER/TAKER) ---
         # Token-id -> {"YES","NO"} mapping (optional exact override via env vars)
@@ -142,12 +163,32 @@ def plot_process_main(q, ctl_q=None, *, maxlen=1800):
 
         # --- figure with 4 rows ---
         plt.ion()
-        fig, axs = plt.subplots(
-            4, 1, sharex=True,
-            gridspec_kw={"height_ratios": [3.0, 2.0, 1.0, 1.0]},
+        fig = plt.figure()
+        gs = fig.add_gridspec(
+            nrows=5,
+            ncols=2,
+            height_ratios=[3.0, 1.5, 2.0, 1.0, 1.0],
+            hspace=0.05,
+            wspace=0.15,
         )
-        fig.subplots_adjust(right=0.80)
-        ax1, ax2, ax3, ax4 = axs
+
+        # Leave room on the right for the Row 1 legend, and on top for the header.
+        fig.subplots_adjust(right=0.80, top=0.92)
+
+        # Row 1 (spans both columns)
+        ax1 = fig.add_subplot(gs[0, :])
+
+        # Row 2 (new): inventory + $ exposure side-by-side
+        ax2L = fig.add_subplot(gs[1, 0], sharex=ax1)
+        ax2R = fig.add_subplot(gs[1, 1], sharex=ax1)
+
+        # Row 3..5 (span both columns)
+        ax3 = fig.add_subplot(gs[2, :], sharex=ax1)
+        ax4 = fig.add_subplot(gs[3, :], sharex=ax1)
+        ax5 = fig.add_subplot(gs[4, :], sharex=ax1)
+
+        # Header (replaces ax1 title). Updated live each refresh.
+        hdr = fig.text(0.01, 0.985, "", ha="left", va="top")
 
         # Row 1: YES/NO mids + dotted FV(ND)
         (l_yes,) = ax1.plot([], [], lw=1, label="YES mid")
@@ -188,8 +229,6 @@ def plot_process_main(q, ctl_q=None, *, maxlen=1800):
                             label=lbl,
                         )
 
-        ax1.set_title("Fills: hollow=MAKER, filled=TAKER")
-
         ax1.set_ylim(-0.02, 1.02)
         ax1.legend(
             loc="center left",
@@ -198,55 +237,60 @@ def plot_process_main(q, ctl_q=None, *, maxlen=1800):
         )
         ax1.set_ylabel("prob")
 
-        # Row 2: Binance price + strike
-        (l_px,) = ax2.plot([], [], lw=1, label="Binance px")
-        (l_k,)  = ax2.plot([], [], lw=1, linestyle=":", alpha=0.8, label="Strike")
-        ax2.legend(
-            loc="center left",
-            bbox_to_anchor=(1.02, 0.5),
-            frameon=False,
-        )
-        ax2.set_ylabel("px")
+        # Row 2 (NEW): Trader inventory (shares) + $ exposure (net outflow)
+        (l_inv_yes,) = ax2L.plot([], [], lw=1, label="YES pos")
+        (l_inv_no,) = ax2L.plot([], [], lw=1, label="NO pos")
+        ax2L.set_ylabel("shares")
+        ax2L.legend(loc="upper left", frameon=False)
 
-        # Row 3: spread OR imbalance (we’ll plot spread by default)
-        (l_sp_y,) = ax3.plot([], [], lw=1, label="YES spread")
-        # (l_sp_n,) = ax3.plot([], [], lw=1, label="NO spread")
-        # (l_mm,)  = ax3.plot([], [], lw=1, label="mid-micro (YES)")
+        (l_exp_yes,) = ax2R.plot([], [], lw=1, label="YES $ out")
+        (l_exp_no,) = ax2R.plot([], [], lw=1, label="NO $ out")
+        ax2R.set_ylabel("$")
+        ax2R.legend(loc="upper left", frameon=False)
+
+        # Row 2: Binance price + strike
+        (l_px,) = ax3.plot([], [], lw=1, label="Binance px")
+        (l_k,) = ax3.plot([], [], lw=1, linestyle=":", alpha=0.8, label="Strike")
         ax3.legend(
             loc="center left",
             bbox_to_anchor=(1.02, 0.5),
             frameon=False,
         )
-        ax3.set_ylabel("spr")
-        ax3.set_ylim(0.0, 0.2)
+        ax3.set_ylabel("px")
 
-        ax3b = ax3.twinx()
-        (l_ib_y1,) = ax3b.plot([], [], lw=1, linestyle=":", alpha=0.8, label="imb YES L1")
-        # (l_ib_n1,) = ax3b.plot([], [], lw=1, linestyle=":", alpha=0.8, label="imb NO L1")
-        (l_ib_y5,) = ax3b.plot([], [], lw=1, linestyle="--", alpha=0.8, label="imb YES L5")
-        # (l_ib_n5,) = ax3b.plot([], [], lw=1, linestyle="--", alpha=0.8, label="imb NO L5")
-        ax3b.set_ylabel("imb")
-        ax3b.set_ylim(-1.05, 1.05)
-
-        # Row 4: diagnostics
-        # (l_gap,) = ax4.plot([], [], lw=1, label="FVgap ND (YES)")
-        (l_p,)   = ax4.plot([], [], lw=1, label="pressure")
-        (l_f,)   = ax4.plot([], [], lw=1, label="momz_fast")
-        (l_s,)   = ax4.plot([], [], lw=1, label="momz_slow")
-        # (l_se,)  = ax4.plot([], [], lw=1, linestyle=":", alpha=0.8, label="sigma_eff")  # optional
-
-        ax4b = ax4.twinx()
-        (l_mus,) = ax4b.plot([], [], lw=1, label="mu/sigma", color='red')
-        ax4b.set_ylabel("mu/sigma")
-        ax4b.set_ylim(-10, 10)
-
+        # Row 3: spread OR imbalance (we’ll plot spread by default)
+        (l_sp_y,) = ax4.plot([], [], lw=1, label="YES spread")
         ax4.legend(
             loc="center left",
             bbox_to_anchor=(1.02, 0.5),
             frameon=False,
         )
-        ax4.set_ylabel("edge")
-        ax4.set_xlabel("t (s)")
+        ax4.set_ylabel("spr")
+        ax4.set_ylim(0.0, 0.2)
+
+        ax3b = ax4.twinx()
+        (l_ib_y1,) = ax3b.plot([], [], lw=1, linestyle=":", alpha=0.8, label="imb YES L1")
+        (l_ib_y5,) = ax3b.plot([], [], lw=1, linestyle="--", alpha=0.8, label="imb YES L5")
+        ax3b.set_ylabel("imb")
+        ax3b.set_ylim(-1.05, 1.05)
+
+        # Row 4: diagnostics
+        (l_p,) = ax5.plot([], [], lw=1, label="pressure")
+        (l_f,) = ax5.plot([], [], lw=1, label="momz_fast")
+        (l_s,) = ax5.plot([], [], lw=1, label="momz_slow")
+
+        ax4b = ax5.twinx()
+        (l_mus,) = ax4b.plot([], [], lw=1, label="mu/sigma", color='red')
+        ax4b.set_ylabel("mu/sigma")
+        ax4b.set_ylim(-10, 10)
+
+        ax5.legend(
+            loc="center left",
+            bbox_to_anchor=(1.02, 0.5),
+            frameon=False,
+        )
+        ax5.set_ylabel("edge")
+        ax5.set_xlabel("t (s)")
 
         fig.canvas.manager.set_window_title("Polymarket 15m monitor")
 
@@ -259,11 +303,6 @@ def plot_process_main(q, ctl_q=None, *, maxlen=1800):
             no_mid.clear()
             fv_yes_nd.clear()
             fv_no_nd.clear()
-
-            # mx_buy.clear()
-            # my_buy.clear()
-            # mx_sell.clear()
-            # my_sell.clear()
 
             for (mx, my) in mxy.values():
                 mx.clear()
@@ -287,6 +326,22 @@ def plot_process_main(q, ctl_q=None, *, maxlen=1800):
 
             fv_gap_nd.clear()
             mid_micro_gap.clear()
+
+            inv_ts.clear()
+            inv_yes.clear()
+            inv_no.clear()
+            exp_yes.clear()
+            exp_no.clear()
+
+            pos["YES"] = pos["NO"] = 0.0
+            cash["YES"] = cash["NO"] = 0.0
+            buy_qty["YES"] = buy_qty["NO"] = 0.0
+            buy_notional["YES"] = buy_notional["NO"] = 0.0
+
+            try:
+                hdr.set_text("")
+            except Exception:
+                pass
 
         while True:
             # pump GUI
@@ -357,6 +412,26 @@ def plot_process_main(q, ctl_q=None, *, maxlen=1800):
                     mx.append(float(snap.ts_s))
                     my.append(float(snap.y))
 
+                    # --- running trader ledger (inventory / $ exposure) ---
+                    px = float(snap.price) if getattr(snap, "price", None) is not None else float(snap.y)
+                    sz = float(getattr(snap, "size", 0.0) or 0.0)
+
+                    if sz > 0.0 and math.isfinite(px):
+                        if side == "BUY":
+                            pos[token] += sz
+                            cash[token] += sz * px
+                            buy_qty[token] += sz
+                            buy_notional[token] += sz * px
+                        else:  # SELL
+                            pos[token] -= sz
+                            cash[token] -= sz * px
+
+                        inv_ts.append(float(snap.ts_s))
+                        inv_yes.append(float(pos["YES"]))
+                        inv_no.append(float(pos["NO"]))
+                        exp_yes.append(float(cash["YES"]))
+                        exp_no.append(float(cash["NO"]))
+
                     # IMPORTANT: PlotMarker must not fall through into PlotSnap handling
                     continue
 
@@ -370,6 +445,18 @@ def plot_process_main(q, ctl_q=None, *, maxlen=1800):
                 if snap.win_start_ms > 0.0 and snap.win_start_ms != last_ws:
                     last_ws = snap.win_start_ms
                     _clear_all()
+                    tokid_to_token.clear()
+                    # re-apply env overrides after clearing
+                    try:
+                        if yes_tok_env:
+                            tokid_to_token[int(yes_tok_env)] = "YES"
+                    except Exception:
+                        pass
+                    try:
+                        if no_tok_env:
+                            tokid_to_token[int(no_tok_env)] = "NO"
+                    except Exception:
+                        pass
                     base_ws_s = snap.win_start_ms / 1000.0
 
                 ts.append(snap.ts_s)
@@ -425,6 +512,46 @@ def plot_process_main(q, ctl_q=None, *, maxlen=1800):
                 else:
                     sc.set_offsets(np.empty((0, 2)))
 
+            # Row 2 (NEW): inventory / exposure
+            if len(inv_ts) > 0:
+                inv_xs = [t - base_ws_s for t in inv_ts]
+                x, y = _nanfilter(inv_xs, list(inv_yes))
+                l_inv_yes.set_data(x, y)
+                x, y = _nanfilter(inv_xs, list(inv_no))
+                l_inv_no.set_data(x, y)
+
+                x, y = _nanfilter(inv_xs, list(exp_yes))
+                l_exp_yes.set_data(x, y)
+                x, y = _nanfilter(inv_xs, list(exp_no))
+                l_exp_no.set_data(x, y)
+            else:
+                l_inv_yes.set_data([], [])
+                l_inv_no.set_data([], [])
+                l_exp_yes.set_data([], [])
+                l_exp_no.set_data([], [])
+
+            # Header stats (PnL, avg buy, scenario PnL). Updated live.
+            try:
+                mid_y = float(yes_mid[-1]) if len(yes_mid) else float("nan")
+                mid_n = float(no_mid[-1]) if len(no_mid) else float("nan")
+
+                net_spent = float(cash["YES"] + cash["NO"])
+                value = float(pos["YES"] * mid_y + pos["NO"] * mid_n)
+                pnl_mtm = value - net_spent
+
+                avg_yes = (buy_notional["YES"] / buy_qty["YES"]) if buy_qty["YES"] > 0 else float("nan")
+                avg_no  = (buy_notional["NO"]  / buy_qty["NO"])  if buy_qty["NO"]  > 0 else float("nan")
+
+                pnl_if_yes = (pos["YES"] * 1.0) - net_spent
+                pnl_if_no  = (pos["NO"]  * 1.0) - net_spent
+
+                hdr.set_text(
+                    f"PnL(MTM): ${pnl_mtm:,.2f} | Avg YES: {avg_yes:.4f}  Avg NO: {avg_no:.4f} | "
+                    f"If YES: ${pnl_if_yes:,.2f}  If NO: ${pnl_if_no:,.2f}  | Markers: hollow=MAKER, filled=TAKER"
+                )
+            except Exception:
+                pass
+
             # Row 1
             x, y = _nanfilter(xs, list(yes_mid)); l_yes.set_data(x, y)
             x, y = _nanfilter(xs, list(no_mid));  l_no.set_data(x, y)
@@ -437,29 +564,21 @@ def plot_process_main(q, ctl_q=None, *, maxlen=1800):
 
             # Row 3 (spread default)
             x, y = _nanfilter(xs, list(imb_y1)); l_ib_y1.set_data(x, y)
-            # x, y = _nanfilter(xs, list(imb_n1)); l_ib_n1.set_data(x, y)
             x, y = _nanfilter(xs, list(imb_y5)); l_ib_y5.set_data(x, y)
-            # x, y = _nanfilter(xs, list(imb_n5)); l_ib_n5.set_data(x, y)
-
             x, y = _nanfilter(xs, list(yes_spread)); l_sp_y.set_data(x, y)
-            # x, y = _nanfilter(xs, list(no_spread));  l_sp_n.set_data(x, y)
 
             # Row 4
-            # x, y = _nanfilter(xs, list(fv_gap_nd));     l_gap.set_data(x, y)
             x, y = _nanfilter(xs, list(pressure));      l_p.set_data(x, y)
             x, y = _nanfilter(xs, list(momz_fast));     l_f.set_data(x, y)
             x, y = _nanfilter(xs, list(momz_slow));     l_s.set_data(x, y)
             x, y = _nanfilter(xs, list(mu_over_sigma)); l_mus.set_data(x, y)
-            # x, y = _nanfilter(xs, list(sigma_eff));     l_se.set_data(x, y)
-            # x, y = _nanfilter(xs, list(mid_micro_gap)); l_mm.set_data(x, y)
 
-            # Full 15m horizon
+            # Growing 15m horizon
             ax4.set_xlim(0.0, max(10.0, min(900.0, xmax)))
 
-            # autoscale y for rows 2–4
-            ax2.relim(); ax2.autoscale_view(scaley=True)
-            ax3.relim(); ax3.autoscale_view(scaley=True)
-            ax4.relim(); ax4.autoscale_view(scaley=True)
+            for ax in (ax2L, ax2R, ax3, ax4, ax5):
+                ax.relim()
+                ax.autoscale_view(scalex=False, scaley=True)
 
             fig.canvas.draw_idle()
 
