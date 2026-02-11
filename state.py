@@ -8,6 +8,8 @@ import time
 from collections import deque
 from dataclasses import dataclass, field
 from typing import Deque, List, Any
+
+from run_context import RunContext
 from momentum import SecPriceBuffer
 from mom_zscore import MomentumZConfig, MomentumZTracker
 from tx_match import TxMatchStore, LagEstimator
@@ -374,10 +376,17 @@ class AppState:
     plot_ctl: PlotControlState = field(default_factory=PlotControlState)
     plot_ctl_q: Any = None
     mom: MomentumState = field(default_factory=MomentumState)
+
+    # --- unified run directory context (ALL artifacts live under logs/<run_id>/...) ---
+    run_ctx: RunContext = field(default_factory=RunContext)
     # --- CLOB↔CHAIN time alignment state ---
     # Populated by ingest_polymarket_clob (last_trade_price) and consumed by chain_marker_task.
     clob_tx: TxMatchStore = field(default_factory=lambda: TxMatchStore(ttl_ms=30 * 60_000, max_items=20_000))
     clob_chain_lag: LagEstimator = field(default_factory=lambda: LagEstimator(alpha=0.02, clip_ms=30_000, min_samples=10))
+
+    def run_path(self, rel: str):
+        """Convenience: resolve a path under the current run dir."""
+        return self.run_ctx.run_path(rel)
 
 
 def burst_badge(level: int) -> str:

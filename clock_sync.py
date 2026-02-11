@@ -92,7 +92,7 @@ async def cloudflare_ntp_offset_task(
                 meas_ms = (-median_s) * 1000.0
 
                 # guardrail against insane jumps (bad parse / transient)
-                if abs(meas_ms - prev) <= 15_000.0:
+                if abs(meas_ms - prev) <= 30_000.0:
                     if prev == 0.0:
                         new = meas_ms  # snap first estimate
                     else:

@@ -58,6 +58,87 @@ class MultiSourceJsonlLogger:
         self._loggers.clear()
 
 
+class RotatingMultiSourceJsonlLogger:
+    """MultiSourceJsonlLogger with runtime rotation.
+
+    Rotation strategy:
+      - Create a new underlying MultiSourceJsonlLogger
+      - Atomically swap it in
+      - Stop (flush) the old one in the background
+
+    This avoids losing events during the roll.
+    """
+
+    def __init__(
+        self,
+        *,
+        base_dir: str,
+        run_id: str,
+        max_queue: int,
+        batch_size: int,
+        flush_every_s: float,
+    ) -> None:
+        self.base_dir = base_dir
+        self.max_queue = max_queue
+        self.batch_size = batch_size
+        self.flush_every_s = flush_every_s
+
+        self._active = MultiSourceJsonlLogger(
+            base_dir=base_dir,
+            run_id=run_id,
+            max_queue=max_queue,
+            batch_size=batch_size,
+            flush_every_s=flush_every_s,
+        )
+
+        # rotation is rare; asyncio is single-threaded here, a lock is enough
+        self._lock = asyncio.Lock()
+
+    @property
+    def run_id(self) -> str:
+        return self._active.run_id
+
+    def log(self, record: Dict[str, Any]) -> None:
+        self._active.log(record)
+
+    async def rotate(self, new_run_id: str) -> None:
+        """Switch to a new run_id (i.e. a new logs/<run_id>/ directory)."""
+        new_run_id = str(new_run_id)
+        if not new_run_id or new_run_id == self._active.run_id:
+            return
+
+        async with self._lock:
+            if new_run_id == self._active.run_id:
+                return
+
+            old = self._active
+            self._active = MultiSourceJsonlLogger(
+                base_dir=self.base_dir,
+                run_id=new_run_id,
+                max_queue=self.max_queue,
+                batch_size=self.batch_size,
+                flush_every_s=self.flush_every_s,
+            )
+
+        # Flush old logger after swap so new events are already routed.
+        try:
+            await old.stop()
+        except Exception:
+            pass
+
+    async def stop(self) -> None:
+        async with self._lock:
+            active = self._active
+            self._active = MultiSourceJsonlLogger(
+                base_dir=self.base_dir,
+                run_id=self._active.run_id,
+                max_queue=self.max_queue,
+                batch_size=self.batch_size,
+                flush_every_s=self.flush_every_s,
+            )
+        await active.stop()
+
+
 @dataclass(slots=True)
 class AsyncJsonlLogger:
     """Async JSONL logger with bounded queue and background writer task."""

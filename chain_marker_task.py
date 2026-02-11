@@ -34,11 +34,8 @@ TOK_DECIMALS = 6  # Polymarket outcome token fill units commonly 1e6
 ORDERFILLED_SIG = "OrderFilled(bytes32,address,address,uint256,uint256,uint256,uint256,uint256)"
 ERC20_TRANSFER_SIG = "Transfer(address,address,uint256)"
 
-_dbg_path = Path("chain_marker.debug.jsonl")
-_match_dbg_path = Path("chain_clob_match.debug.jsonl")
-
-
-_tracked_fills_path = Path("tracked_trader_fills.jsonl")
+# NOTE: all artifact paths are resolved dynamically via state.run_ctx so they follow
+# the BTC 15m market-based run directory (and roll correctly).
 
 _TRACKED_REQUIRED = {
     "type",
@@ -59,7 +56,7 @@ _TRACKED_REQUIRED = {
 }
 
 
-def _write_tracked_fill(obj: dict) -> None:
+def _write_tracked_fill(state: AppState, obj: dict) -> None:
     """
     Crash-fast, schema-stable JSONL log of the *exact* fills we emit as PlotMarker.
     One line per tracked fill.
@@ -91,21 +88,22 @@ def _write_tracked_fill(obj: dict) -> None:
     if role not in ("MAKER", "TAKER"):
         raise RuntimeError(f"tracked_trader_fills bad role: {role}")
 
-    with _tracked_fills_path.open("a", encoding="utf-8") as f:
+    path = state.run_ctx.run_path("tracked_trader_fills.jsonl")
+    with path.open("a", encoding="utf-8") as f:
         f.write(json.dumps(obj, ensure_ascii=False) + "\n")
 
 
-def _dbg_log(obj: dict) -> None:
+def _dbg_log(state: AppState, obj: dict) -> None:
     try:
-        with _dbg_path.open("a", encoding="utf-8") as f:
+        with state.run_ctx.run_path("chain_marker.debug.jsonl").open("a", encoding="utf-8") as f:
             f.write(json.dumps(obj, ensure_ascii=False) + "\n")
     except Exception:
         pass
 
 
-def _match_dbg_log(obj: dict) -> None:
+def _match_dbg_log(state: AppState, obj: dict) -> None:
     try:
-        with _match_dbg_path.open("a", encoding="utf-8") as f:
+        with state.run_ctx.run_path("chain_clob_match.debug.jsonl").open("a", encoding="utf-8") as f:
             f.write(json.dumps(obj, ensure_ascii=False) + "\n")
     except Exception:
         pass
@@ -391,6 +389,7 @@ async def chain_marker_task(
             # If we're caught up to safe_head, wait for more blocks.
             if from_block > safe_head:
                 _dbg_log(
+                    state,
                     {
                         "type": "chain_marker_liveness",
                         "ts_ms": int(time.time() * 1000),
@@ -409,6 +408,7 @@ async def chain_marker_task(
             to_block = from_block if mode == "polygon" else min(safe_head, from_block + max_block_span)
 
             _dbg_log(
+                state,
                 {
                     "type": "chain_marker_liveness",
                     "ts_ms": int(time.time() * 1000),
@@ -541,6 +541,7 @@ async def chain_marker_task(
 
                 # Dedicated match/fallback logging.
                 _match_dbg_log(
+                    state,
                     {
                         "type": "chain_clob_match",
                         "ts_local_ms": int(time.time() * 1000),
@@ -578,6 +579,7 @@ async def chain_marker_task(
                 try:
                     # NEW: stable ledger-style fill log (mirrors what plot sees)
                     _write_tracked_fill(
+                        state,
                         {
                             "type": "tracked_fill",
                             "ts_local_ms": int(time.time() * 1000),
@@ -597,11 +599,12 @@ async def chain_marker_task(
                         }
                     )
                 except Exception as e:
-                    _dbg_log({"type": "tracked_fill_fatal", "err": str(e), "tx_hash": txh})
+                    _dbg_log(state, {"type": "tracked_fill_fatal", "err": str(e), "tx_hash": txh})
                     raise
 
                 # PRESERVED debug logging, plus minimal extra fields
                 _dbg_log(
+                    state,
                     {
                         "type": "orderfilled",
                         "ts_ms": int(time.time() * 1000),

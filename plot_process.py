@@ -37,14 +37,22 @@ def _nanfilter(xs, ys):
     return outx, outy
 
 
-def plot_process_main(q, ctl_q=None, *, maxlen=1800):
+def plot_process_main(q, ctl_q=None, *, maxlen=1800, run_dir: str | None = None):
     """
     Runs in its own process. Owns matplotlib GUI.
     Receives PlotSnap messages and maintains deques.
     """
     # --- ring buffers (15m @ 2Hz) ---
 
-    err_path = Path("plot_process.err.jsonl")
+    # All artifacts must live under logs/<run_id>/...
+    if run_dir:
+        try:
+            Path(run_dir).mkdir(parents=True, exist_ok=True)
+        except Exception:
+            pass
+        err_path = Path(run_dir) / "plot_process.err.jsonl"
+    else:
+        err_path = Path("logs") / "plot_process.err.jsonl"  # last-resort fallback
 
     def _log_err(where: str, exc: BaseException):
         rec = {
@@ -138,6 +146,17 @@ def plot_process_main(q, ctl_q=None, *, maxlen=1800):
             ("NO", "BUY"): "blue",
             ("NO", "SELL"): "orange",
         }
+
+        # --- control messages ---
+        def _apply_ctl(ctl: PlotCtl) -> None:
+            nonlocal err_path
+            # ... existing logic handled elsewhere in loop; we only care about run_dir here
+            if getattr(ctl, "run_dir", None):
+                try:
+                    Path(str(ctl.run_dir)).mkdir(parents=True, exist_ok=True)
+                    err_path = Path(str(ctl.run_dir)) / "plot_process.err.jsonl"
+                except Exception:
+                    pass
 
         enabled = True
         show = True
@@ -338,6 +357,15 @@ def plot_process_main(q, ctl_q=None, *, maxlen=1800):
                             mq = getattr(ctl, "market_question", None)
                             if isinstance(mq, str) and mq.strip():
                                 current_question = mq.strip()
+
+                            # NEW: update run_dir for plot-side artifacts (e.g. plot_process.err.jsonl)
+                            rd = getattr(ctl, "run_dir", None)
+                            if isinstance(rd, str) and rd.strip():
+                                try:
+                                    Path(rd).mkdir(parents=True, exist_ok=True)
+                                    err_path = Path(rd) / "plot_process.err.jsonl"
+                                except Exception:
+                                    pass
 
                             # NEW: deterministic YES/NO token mapping (and clear old mapping on reset)
                             yid = getattr(ctl, "yes_token_id", None)

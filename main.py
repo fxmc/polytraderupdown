@@ -27,7 +27,7 @@ from config import (
 )
 from ingest_binance import binance_ws_task
 from maker_metrics import danger_score_bid, danger_score_ask
-from raw_logger import AsyncJsonlLogger
+from raw_logger import AsyncJsonlLogger, RotatingMultiSourceJsonlLogger
 from state import AppState
 from ui import build_keybindings, build_layout, ui_refresh_loop
 from candles import TF_15M_MS, bucket_start_ms
@@ -38,13 +38,53 @@ from plot_tasks import plot_sampler_task
 from plot_process import plot_process_main
 from plot_ipc import PlotCtl
 from chain_marker_task import chain_marker_task
+from run_context import bucket_start_ms_from_serverish_clock
+
+
+async def run_dir_roll_task(state: AppState, logger: RotatingMultiSourceJsonlLogger) -> None:
+    """Monitors BTC 15m market start and rolls the run directory when it changes.
+
+    Source of truth:
+      - Prefer state.book.market_start_ms (Polymarket Gamma eventStartTime)
+      - Otherwise compute the current 15m bucket start using the same "serverish" clock
+
+    On roll:
+      - update state.run_ctx
+      - rotate logger sinks
+      - notify plot process (error log path etc.) via PlotCtl
+    """
+    last_run_id = getattr(state.run_ctx, "run_id", "")
+    while True:
+        await asyncio.sleep(0.25)
+
+        start_ms = int(getattr(state.book, "market_start_ms", 0) or 0)
+        if start_ms <= 0:
+            start_ms = bucket_start_ms_from_serverish_clock(
+                last_clob_event_ms=getattr(state.diag, "clob_last_book_event_ms", 0),
+                clock_offset_ms=getattr(state.diag, "clock_offset_ms", 0.0),
+                now_local_ms=int(time.time() * 1000.0),
+            )
+
+        changed = state.run_ctx.set_market_start_ms(start_ms)
+        if not changed:
+            continue
+
+        if state.run_ctx.run_id != last_run_id:
+            last_run_id = state.run_ctx.run_id
+            await logger.rotate(state.run_ctx.run_id)
+
+            # Tell plot process the new run directory (so its own error logs follow the roll)
+            try:
+                q = getattr(state, "plot_ctl_q", None)
+                if q is not None:
+                    from plot_ipc import PlotCtl
+
+                    q.put_nowait(PlotCtl(run_dir=state.run_ctx.run_dir))
+            except Exception:
+                pass
 
 TRADER_WALLET = "0x912a58103662ebe2e30328a305bc33131eca0f92"
 POLY_MODE = "ankr"
-
-
-def _run_id() -> str:
-    return "run_" + time.strftime("%Y%m%d_%H%M%S")
 
 
 def init_state(state: AppState) -> None:
@@ -65,11 +105,18 @@ def init_state(state: AppState) -> None:
         state.tape_resolver.lines.append("")
 
 
-def _raw_log_path() -> str:
-    """Return the default raw log path for this run."""
-    os.makedirs(RAW_LOG_DIR, exist_ok=True)
-    ts = time.strftime("%Y%m%d_%H%M%S")
-    return os.path.join(RAW_LOG_DIR, f"raw_{ts}.jsonl")
+def _ensure_run_context(state: AppState) -> None:
+    """Initialize state.run_ctx to the *current BTC 15m window* and create the directory."""
+    start_ms = bucket_start_ms_from_serverish_clock(
+        last_clob_event_ms=getattr(state.diag, "clob_last_book_event_ms", 0),
+        clock_offset_ms=getattr(state.diag, "clock_offset_ms", 0.0),
+        now_local_ms=int(time.time() * 1000.0),
+    )
+    # If already set, keep it (useful in tests / overrides)
+    if not getattr(state.run_ctx, "market_start_ms", 0):
+        state.run_ctx.set_market_start_ms(int(start_ms))
+    else:
+        state.run_ctx.ensure()
 
 
 async def loop_drift_task(state: AppState) -> None:
@@ -111,6 +158,9 @@ async def run_app(
     state = AppState()
     init_state(state)
 
+    # Run dir is keyed to BTC 15m market start (UTC) and may roll.
+    _ensure_run_context(state)
+
     # Optional strike override (useful if you start mid-market and already know the strike).
     # We also set the current 15m window start/expiry based on local time so TTE/FV can work immediately.
     if strike is not None:
@@ -123,10 +173,9 @@ async def run_app(
     if polym_strike is not None:
         state.resolver.strike = float(polym_strike)
 
-    run_id = _run_id()
-    logger = MultiSourceJsonlLogger(
+    logger = RotatingMultiSourceJsonlLogger(
         base_dir=RAW_LOG_DIR,
-        run_id=run_id,
+        run_id=state.run_ctx.run_id,
         max_queue=RAW_LOG_MAX_QUEUE,
         batch_size=RAW_LOG_BATCH_SIZE,
         flush_every_s=RAW_LOG_FLUSH_EVERY_S,
@@ -154,7 +203,7 @@ async def run_app(
     plot_proc = mp.Process(
         target=plot_process_main,
         args=(plot_q, plot_ctl_q),
-        kwargs={"maxlen": 1800},
+        kwargs={"maxlen": 1800, "run_dir": state.run_ctx.run_dir},
         daemon=True,
     )
     plot_proc.start()
@@ -185,6 +234,7 @@ async def run_app(
         pass
 
     asyncio.create_task(ui_refresh_loop(app, hz=UI_HZ))
+    asyncio.create_task(run_dir_roll_task(state, logger))
     asyncio.create_task(polymarket_clob_autoresolve_task(state, logger, binance_symbol=symbol, max_levels=5))
     asyncio.create_task(polymarket_rtds_task(state, logger, binance_symbol=symbol))
     asyncio.create_task(binance_ws_task(state, logger, symbol=symbol))

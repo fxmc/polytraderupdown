@@ -59,6 +59,9 @@ class PlotCtl:
     yes_token_id: Optional[int] = None
     no_token_id: Optional[int] = None
 
+    # NEW: where the plot process should write its own artifacts (errors, debug dumps, etc.)
+    run_dir: Optional[str] = None
+
 
 @dataclass(slots=True)
 class PlotMarker:
