@@ -15,7 +15,6 @@ from pathlib import Path
 from bisect import insort
 
 
-
 def _nanfilter(xs, ys):
     outx, outy = [], []
     for x, y in zip(xs, ys, strict=False):
@@ -37,7 +36,7 @@ def _nanfilter(xs, ys):
     return outx, outy
 
 
-def plot_process_main(q, ctl_q=None, *, maxlen=1800, run_dir: str | None = None):
+def plot_process_main(q, ctl_q=None, *, maxlen=1800, run_dir: str | None = None, trader_wallet: str | None = None, trader_name: str | None = None):
     """
     Runs in its own process. Owns matplotlib GUI.
     Receives PlotSnap messages and maintains deques.
@@ -189,7 +188,7 @@ def plot_process_main(q, ctl_q=None, *, maxlen=1800, run_dir: str | None = None)
         ax5 = fig.add_subplot(gs[4, :], sharex=ax1)
 
         # Header (replaces ax1 title). Updated live each refresh.
-        hdr = fig.text(0.01, 0.985, "", ha="left", va="top")
+        hdr = fig.text(0.01, 0.99, "", ha="left", va="top")
 
         # Row 1: YES/NO mids + dotted FV(ND)
         (l_yes,) = ax1.plot([], [], lw=1, label="YES mid")
@@ -638,11 +637,6 @@ def plot_process_main(q, ctl_q=None, *, maxlen=1800, run_dir: str | None = None)
                 pnl_if_yes = (pos["YES"] * 1.0) - net_spent
                 pnl_if_no  = (pos["NO"]  * 1.0) - net_spent
 
-                yes_sh = float(pos["YES"])
-                no_sh = float(pos["NO"])
-                yes_usd = float(cash["YES"])
-                no_usd = float(cash["NO"])
-
                 stats_line = (
                     f"PnL(MTM): ${pnl_mtm:,.2f} | "
                     f"Pos YES/NO: {pos['YES']:.0f}/{pos['NO']:.0f} | "
@@ -652,12 +646,28 @@ def plot_process_main(q, ctl_q=None, *, maxlen=1800, run_dir: str | None = None)
                     f"Markers: hollow=MAKER, filled=TAKER"
                 )
 
+                tracked_line = None
+                if trader_wallet:
+                    w = trader_wallet.strip()
+                    w_short = f"{w[:6]}…{w[-4:]}" if len(w) > 14 else w
+                    name = (trader_name or "Unknown").strip()
+                    tracked_line = f"Tracked: {name} ({w_short})"
+
                 # IMPORTANT: escape $ to avoid mathtext (which italicizes text)
                 stats_line = stats_line.replace("$", r"\$")
+                if tracked_line:
+                    tracked_line = tracked_line.replace("$", r"\$")
+
                 if current_question:
-                    hdr.set_text(f"{current_question}\n{stats_line}")
+                    lines = [current_question, stats_line]
+                    if tracked_line:
+                        lines.insert(1, tracked_line)  # right after question/title
+                    hdr.set_text("\n".join(lines))
                 else:
-                    hdr.set_text(stats_line)
+                    lines = [stats_line]
+                    if tracked_line:
+                        lines.insert(0, tracked_line)  # if no question, put tracked first
+                    hdr.set_text("\n".join(lines))
 
             except Exception:
                 pass

@@ -13,7 +13,7 @@ from dataclasses import dataclass
 import requests
 
 from analysis.analysis_tools.sessions import fetch_json, make_async_session
-from analysis.analysis_tools.consts import TRADES_URL, NYC, PUBLIC_PROFILE
+from analysis.analysis_tools.consts import TRADES_URL, NYC, PUBLIC_PROFILE, PUBLIC_SEARCH
 from analysis.analysis_tools.marketctx import MarketContext
 from analysis.analysis_tools.marketresolution import resolve_market_coin_start_time, resolve_market_coin_start_time_sync
 
@@ -156,7 +156,7 @@ def get_trades_sync(market: str, *, wallet: str | None, limit: int = 500, taker_
     )
 
 
-def grab_trades_for_trader_market_sync(proxy_wallet: str, condition_id: str, trials: int = 1) -> tuple[pd.DataFrame | None, float | None]:
+def grab_trades_for_trader_market_sync(proxy_wallet: str, condition_id: str) -> tuple[pd.DataFrame | None, float | None]:
     df_maker = get_trades_sync(condition_id, wallet=proxy_wallet, taker_only=False)
 
     if df_maker is None:    # since df_maker returns all trades, difficult to have taker trades if this is None!
@@ -173,6 +173,13 @@ def get_trader_information_sync(proxy_wallet: str) -> dict[str, Any] | None:
     }
     data: dict[str, Any] = requests.get(PUBLIC_PROFILE, params=params).json()
     return data
+
+
+def get_details_from_name(trader_name: str) -> list[dict[str, Any]] | None:
+    params = {'q': 'ratue', 'search_profiles': True}
+    response = requests.get(PUBLIC_SEARCH, params=params)
+    data = response.json()
+    return [p for p in data['profiles'] if p['name'] == trader_name]
 
 
 def get_market_outcome_sync(proxy_wallet: str, coin: str, start_date: dt.datetime) -> tuple[MarketOutcome, pd.DataFrame] | tuple[None, None]:

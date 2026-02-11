@@ -10,12 +10,12 @@ from __future__ import annotations
 
 import asyncio
 import argparse
-import os
 import time
 import multiprocessing as mp
 
 from prompt_toolkit.application import Application
 
+from analysis.analysis_tools.traderanalysis import get_trader_information_async, get_details_from_name
 from clock_sync import cloudflare_ntp_offset_task
 from config import (
     RAW_LOG_BATCH_SIZE,
@@ -33,7 +33,6 @@ from ui import build_keybindings, build_layout, ui_refresh_loop
 from candles import TF_15M_MS, bucket_start_ms
 from ingest_polymarket_rtds import polymarket_rtds_task
 from ingest_polymarket_clob import polymarket_clob_autoresolve_task
-from raw_logger import MultiSourceJsonlLogger
 from plot_tasks import plot_sampler_task
 from plot_process import plot_process_main
 from plot_ipc import PlotCtl
@@ -152,7 +151,8 @@ async def run_app(
     symbol: str,
     strike: float | None = None,
     polym_strike: float | None = None,
-    trader_wallet: str | None = None
+    trader_wallet: str | None = None,
+    trader_name: str | None = None
 ) -> None:
     """Create and run the application."""
     state = AppState()
@@ -200,10 +200,19 @@ async def run_app(
     # expose control queue to UI keybindings
     state.plot_ctl_q = plot_ctl_q
 
+    if (trader_wallet is not None) and (trader_name is None):
+        trader_details = await get_trader_information_async(trader_wallet)
+        trader_name = trader_details["name"]
+    elif (trader_wallet is None) and (trader_name is not None):
+        trader_details = get_details_from_name(trader_name)
+        trader_wallet = trader_details[0]['proxyWallet']
+    else:
+        raise RuntimeError(f"Can have only trader_wallet or trader_name, but not both")
+
     plot_proc = mp.Process(
         target=plot_process_main,
         args=(plot_q, plot_ctl_q),
-        kwargs={"maxlen": 1800, "run_dir": state.run_ctx.run_dir},
+        kwargs={"maxlen": 1800, "run_dir": state.run_ctx.run_dir, "trader_wallet": trader_wallet, "trader_name": trader_name},
         daemon=True,
     )
     plot_proc.start()
@@ -417,22 +426,31 @@ def main() -> None:
         help="Optional Polymarket strike override (shown in resolver pane only).",
     )
 
-    p.add_argument(
+    group = p.add_mutually_exclusive_group()
+
+    group.add_argument(
         "--trader-wallet",
         type=str,
-        default=TRADER_WALLET,
+        default=None,
         help="Wallet to track"
     )
+
+    group.add_argument(
+        "--trader-name",
+        type=str,
+        default=None,
+        help="Trader name to track"
+    )
+
     args = p.parse_args()
-    print(args.trader_wallet)
-    time.sleep(3)
 
     asyncio.run(
         run_app(
             symbol=args.symbol,
             strike=args.strike,
             polym_strike=args.polym_strike,
-            trader_wallet=args.trader_wallet
+            trader_wallet=args.trader_wallet,
+            trader_name=args.trader_name
         )
     )
 

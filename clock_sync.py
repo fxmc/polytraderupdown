@@ -4,10 +4,11 @@ import asyncio
 import re
 import statistics
 import subprocess
-from dataclasses import dataclass
-from typing import Optional
+import logging
 
 from state import AppState
+
+LOGGER = logging.getLogger(__name__)
 
 _OFFSET_RE = re.compile(r"([+-]\d+\.\d+)s")
 
@@ -102,10 +103,14 @@ async def cloudflare_ntp_offset_task(
                     state.diag.clock_offset_src = f"w32tm({host})"
                     prev = new
 
-        except Exception as e:
-            # keep last good value; no spam logging here
-            print('Error: ', str(e))
-            pass
+        except subprocess.TimeoutExpired:
+            # keep last good value; report via logger + UI source field
+            state.diag.clock_offset_src = f"w32tm({host}) TIMEOUT"
+            LOGGER.warning("clock_sync timeout running w32tm stripchart (host=%s, samples=%s)", host, samples, exc_info=True)
+        except Exception:
+            state.diag.clock_offset_src = f"w32tm({host}) ERROR"
+            LOGGER.exception("clock_sync failed (host=%s, samples=%s)", host, samples)
+
 
         await asyncio.sleep(every_s)
 
