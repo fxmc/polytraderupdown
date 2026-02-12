@@ -90,3 +90,5 @@ PM_COIN_BY_BINANCE = {
 FV_QUIET_MS = 2500.0
 FV_SIGMA_FLOOR_K = 0.60
 FV_SIGMA_HOLD_MS = 15000.0
+
+CLOB_HOST = "https://clob.polymarket.com"

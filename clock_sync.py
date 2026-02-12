@@ -4,18 +4,23 @@ import asyncio
 import re
 import statistics
 import subprocess
+import time
 import logging
 
 from state import AppState
 
+# IMPORTANT: never write to stdout/stderr from background tasks in a prompt_toolkit app.
+# This logger is intentionally silenced unless the app config attaches handlers elsewhere.
 LOGGER = logging.getLogger(__name__)
+LOGGER.addHandler(logging.NullHandler())
+LOGGER.propagate = False
 
 _OFFSET_RE = re.compile(r"([+-]\d+\.\d+)s")
 
 
 def _run_w32tm_stripchart(host: str, samples: int) -> str:
     """
-    Blocking call to w32tm. Returns stdout as text.
+    Blocking call to w32tm. Returns stdout+stderr as text.
     """
     cmd = [
         "w32tm",
@@ -54,6 +59,18 @@ def _ewma(prev: float, x: float, alpha: float) -> float:
     return alpha * x + (1.0 - alpha) * prev
 
 
+def _append_clock_sync_err(state: AppState, msg: str) -> None:
+    """Write a short error line into the current run dir (never stdout/stderr)."""
+    try:
+        p = state.run_ctx.run_path("clock_sync.err.log")
+        ts = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        with p.open("a", encoding="utf-8") as f:
+            f.write(f"{ts} {msg}\n")
+    except Exception:
+        # last resort: never print to terminal
+        return
+
+
 async def cloudflare_ntp_offset_task(
     state,
     *,
@@ -73,18 +90,16 @@ async def cloudflare_ntp_offset_task(
     - Uses asyncio.to_thread so we don't block the asyncio loop.
     - Uses median(samples) then EWMA smoothing.
     """
-    # warm start from whatever is currently in state
     prev = float(getattr(state.diag, "clock_offset_ms", 0.0) or 0.0)
     if prev == 0.0:
         state.diag.clock_offset_src = "...waiting"
     else:
-        state.diag.clock_offset_src = f"w32tm({host})"  # or keep old src
+        state.diag.clock_offset_src = f"w32tm({host})"
 
     while True:
         try:
             out = await asyncio.to_thread(_run_w32tm_stripchart, host, samples)
             offsets = _parse_server_minus_local_seconds(out)
-            # print('offsets:', offsets)
 
             if offsets:
                 # offsets are (server - local) in seconds.
@@ -94,23 +109,23 @@ async def cloudflare_ntp_offset_task(
 
                 # guardrail against insane jumps (bad parse / transient)
                 if abs(meas_ms - prev) <= 30_000.0:
-                    if prev == 0.0:
-                        new = meas_ms  # snap first estimate
-                    else:
-                        new = _ewma(prev, meas_ms, alpha)
-
+                    new = meas_ms if prev == 0.0 else _ewma(prev, meas_ms, alpha)
                     state.diag.clock_offset_ms = new
                     state.diag.clock_offset_src = f"w32tm({host})"
                     prev = new
 
         except subprocess.TimeoutExpired:
-            # keep last good value; report via logger + UI source field
+            # keep last good value; do NOT emit traceback to terminal
             state.diag.clock_offset_src = f"w32tm({host}) TIMEOUT"
-            LOGGER.warning("clock_sync timeout running w32tm stripchart (host=%s, samples=%s)", host, samples, exc_info=True)
-        except Exception:
-            state.diag.clock_offset_src = f"w32tm({host}) ERROR"
-            LOGGER.exception("clock_sync failed (host=%s, samples=%s)", host, samples)
+            _append_clock_sync_err(state, f"TIMEOUT host={host} samples={samples}")
 
+        except Exception as e:
+            # keep last good value; do NOT emit traceback to terminal
+            state.diag.clock_offset_src = f"w32tm({host}) ERROR"
+            _append_clock_sync_err(
+                state,
+                f"ERROR host={host} samples={samples} err={type(e).__name__}: {e}",
+            )
 
         await asyncio.sleep(every_s)
 
